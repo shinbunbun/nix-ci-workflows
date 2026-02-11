@@ -1,0 +1,31 @@
+# Nixフォーマットチェック Reusable Workflow
+#
+# nix fmt でコードフォーマットの一貫性を検証する。
+# --fail-on-change フラグにより、未フォーマットのコードがあればCIを失敗させる。
+#
+# 使用方法:
+#   uses: shinbunbun/nix-ci-workflows/.github/workflows/format-check.yaml@main
+
+name: Format Check
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'GitHub Actions runner'
+        type: string
+        default: 'ubuntu-latest'
+
+jobs:
+  format-check:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Nix with flakes enabled
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            access-tokens = github.com=${{ github.token }}
+      - name: Check Nix code formatting
+        run: nix fmt -- --fail-on-change

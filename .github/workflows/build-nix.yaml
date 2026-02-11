@@ -1,0 +1,149 @@
+# 単一ターゲットビルド用 Reusable Workflow
+#
+# 指定されたNixビルドターゲットをビルドし、Atticキャッシュにプッシュする。
+# WireGuard VPN接続はオプション（needs-wireguard で制御）。
+# Atticキャッシュ連携はオプション（use-attic で制御）。
+# SOPS秘密鍵のセットアップもオプション。
+#
+# 使用方法:
+#   uses: shinbunbun/nix-ci-workflows/.github/workflows/build-nix.yaml@main
+#   with:
+#     runner: ubuntu-latest
+#     build-target: ".#nixosConfigurations.homeMachine.config.system.build.toplevel"
+#     result-name: homeMachine
+#     needs-sops: true
+#     needs-wireguard: true
+
+name: Build Nix Target
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'GitHub Actions runner (e.g. ubuntu-latest, macos-latest)'
+        required: true
+        type: string
+      build-target:
+        description: 'Nix build target expression'
+        required: true
+        type: string
+      result-name:
+        description: '--out-link name'
+        required: true
+        type: string
+      needs-sops:
+        description: 'Whether SOPS key setup is needed'
+        required: false
+        type: boolean
+        default: false
+      needs-wireguard:
+        description: 'Whether WireGuard VPN is needed for Attic access'
+        required: false
+        type: boolean
+        default: false
+      use-attic:
+        description: 'Whether to use Attic binary cache (substituter + push)'
+        required: false
+        type: boolean
+        default: true
+      push-to-cache:
+        description: 'Whether to push build results to Attic cache'
+        required: false
+        type: boolean
+        default: true
+      attic-server:
+        description: 'Attic server URL for push (internal or public)'
+        required: false
+        type: string
+        default: 'https://cache.shinbunbun.com'
+    secrets:
+      AUTHENTIK_CLIENT_ID:
+        required: false
+      ATTIC_TOKEN:
+        required: false
+      ATTIC_READ_TOKEN:
+        required: false
+      SOPS_AGE_KEY:
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup WireGuard VPN
+        if: inputs.needs-wireguard
+        uses: shinbunbun/nix-ci-workflows/.github/actions/wireguard@main
+        with:
+          authentik-client-id: ${{ secrets.AUTHENTIK_CLIENT_ID }}
+
+      - name: Install Nix with flakes enabled (with Attic)
+        if: inputs.use-attic
+        uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            substituters = https://cache.nixos.org https://cache.shinbunbun.com/main
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= main:EMoov6FniyxjYhY24OcZ02dOIWKu4feJH7uGRjgwwUc=
+            netrc-file = /etc/nix/netrc
+            fallback = true
+            connect-timeout = 5
+
+      - name: Install Nix with flakes enabled (without Attic)
+        if: ${{ !inputs.use-attic }}
+        uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Setup SOPS
+        if: inputs.needs-sops
+        run: |
+          sudo mkdir -p /var/lib/sops-nix
+          echo "${{ secrets.SOPS_AGE_KEY }}" | sudo tee /var/lib/sops-nix/key.txt > /dev/null
+          sudo chmod 600 /var/lib/sops-nix/key.txt
+
+      - name: Setup Attic authentication
+        if: inputs.use-attic
+        run: |
+          TOKEN="${{ secrets.ATTIC_READ_TOKEN }}"
+          if [[ -z "$TOKEN" ]]; then
+            TOKEN="${{ secrets.ATTIC_TOKEN }}"
+          fi
+          if [[ -n "$TOKEN" ]]; then
+            echo "machine cache.shinbunbun.com password $TOKEN" | sudo tee /etc/nix/netrc > /dev/null
+            sudo chmod 600 /etc/nix/netrc
+          fi
+
+      - name: Build Nix target
+        run: |
+          nix build "${{ inputs.build-target }}" \
+            --print-build-logs \
+            --show-trace \
+            --out-link "result-${{ inputs.result-name }}"
+
+      - name: Configure and push to Attic cache
+        if: inputs.use-attic && inputs.push-to-cache && github.event_name == 'push'
+        run: |
+          nix build .#attic --out-link attic-cli 2>/dev/null || \
+            nix build .#packages.x86_64-linux.attic --out-link attic-cli 2>/dev/null || \
+            nix build .#packages.aarch64-darwin.attic --out-link attic-cli 2>/dev/null || true
+
+          if [[ ! -L attic-cli ]]; then
+            echo "Attic CLI not available, skipping cache push"
+            exit 0
+          fi
+
+          ./attic-cli/bin/attic login ci "${{ inputs.attic-server }}" ${{ secrets.ATTIC_TOKEN }}
+          ./attic-cli/bin/attic cache create main || echo "Cache already exists"
+
+          echo "Pushing build result to cache..."
+          ./attic-cli/bin/attic push -j 3 main "result-${{ inputs.result-name }}" || echo "Failed to push build result (non-fatal)"
+        continue-on-error: true

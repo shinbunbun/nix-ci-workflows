@@ -1,0 +1,151 @@
+# deploy-rsデプロイ Reusable Workflow
+#
+# WireGuard VPN経由でSSH接続し、deploy-rsでNixOSデプロイを実行する。
+# デプロイ結果をDiscord通知する。
+#
+# 使用方法:
+#   uses: shinbunbun/nix-ci-workflows/.github/workflows/deploy-nix.yaml@main
+#   with:
+#     deploy-target: ".#homeMachine"
+#     ssh-hostname: homemachine
+#     ssh-host: "192.168.1.3"
+
+name: Deploy NixOS
+
+on:
+  workflow_call:
+    inputs:
+      deploy-target:
+        description: 'deploy-rs target (e.g. ".#homeMachine", ".#nixos-desktop")'
+        required: true
+        type: string
+      ssh-hostname:
+        description: 'SSH config Host name'
+        required: true
+        type: string
+      ssh-host:
+        description: 'SSH connection IP address'
+        required: true
+        type: string
+      ssh-port:
+        description: 'SSH port'
+        required: false
+        type: string
+        default: '31415'
+      ssh-user:
+        description: 'SSH user'
+        required: false
+        type: string
+        default: 'deploy'
+      needs-sops:
+        description: 'Whether SOPS key setup is needed'
+        required: false
+        type: boolean
+        default: false
+      attic-server:
+        description: 'Attic server URL'
+        required: false
+        type: string
+        default: 'https://cache.shinbunbun.com'
+    secrets:
+      AUTHENTIK_CLIENT_ID:
+        required: true
+      ATTIC_TOKEN:
+        required: false
+      ATTIC_READ_TOKEN:
+        required: false
+      DEPLOY_SSH_KEY:
+        required: true
+      DISCORD_WEBHOOK_URL:
+        required: false
+      SOPS_AGE_KEY:
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup WireGuard VPN
+        uses: shinbunbun/nix-ci-workflows/.github/actions/wireguard@main
+        with:
+          authentik-client-id: ${{ secrets.AUTHENTIK_CLIENT_ID }}
+
+      - name: Install Nix with flakes enabled
+        uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            substituters = https://cache.nixos.org https://cache.shinbunbun.com/main
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= main:EMoov6FniyxjYhY24OcZ02dOIWKu4feJH7uGRjgwwUc=
+            netrc-file = /etc/nix/netrc
+            fallback = true
+            connect-timeout = 5
+
+      - name: Setup Attic authentication
+        run: |
+          TOKEN="${{ secrets.ATTIC_READ_TOKEN }}"
+          if [[ -z "$TOKEN" ]]; then
+            TOKEN="${{ secrets.ATTIC_TOKEN }}"
+          fi
+          if [[ -n "$TOKEN" ]]; then
+            echo "machine cache.shinbunbun.com password $TOKEN" | sudo tee /etc/nix/netrc > /dev/null
+            sudo chmod 600 /etc/nix/netrc
+          fi
+
+      - name: Setup SOPS
+        if: inputs.needs-sops
+        run: |
+          sudo mkdir -p /var/lib/sops-nix
+          echo "${{ secrets.SOPS_AGE_KEY }}" | sudo tee /var/lib/sops-nix/key.txt > /dev/null
+          sudo chmod 600 /var/lib/sops-nix/key.txt
+
+      - name: Setup SSH for deployment
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          cat >> ~/.ssh/config << EOF
+          Host ${{ inputs.ssh-hostname }}
+            HostName ${{ inputs.ssh-host }}
+            Port ${{ inputs.ssh-port }}
+            User ${{ inputs.ssh-user }}
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+          EOF
+
+      - name: Test SSH connectivity
+        run: |
+          ssh ${{ inputs.ssh-hostname }} 'echo "SSH connection via WireGuard OK"'
+        timeout-minutes: 2
+
+      - name: Deploy with deploy-rs
+        run: |
+          nix run .#deploy-rs -- \
+            --skip-checks \
+            ${{ inputs.deploy-target }}
+
+      - name: Notify deployment success
+        if: success() && secrets.DISCORD_WEBHOOK_URL != ''
+        run: |
+          curl -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"content\": \"🚀 **デプロイ成功**\\n\\nTarget: \`${{ inputs.deploy-target }}\`\\nCommit: \`${{ github.sha }}\`\\nhttps://github.com/${{ github.repository }}/commit/${{ github.sha }}\"
+            }"
+
+      - name: Notify deployment failure
+        if: failure() && secrets.DISCORD_WEBHOOK_URL != ''
+        run: |
+          curl -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"content\": \"❌ **デプロイ失敗**\\n\\nTarget: \`${{ inputs.deploy-target }}\`\\nLogs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+            }"

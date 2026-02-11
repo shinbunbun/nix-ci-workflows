@@ -1,0 +1,35 @@
+name: 'WireGuard VPN'
+description: 'Setup WireGuard VPN with automatic teardown via post step'
+
+inputs:
+  peer-issuer-url:
+    description: 'peer-issuer API URL'
+    required: false
+    default: 'https://wg-lease.shinbunbun.com'
+  ttl-seconds:
+    description: 'Lease TTL in seconds'
+    required: false
+    default: '3600'
+  attic-host:
+    description: 'Attic server IP to route through VPN'
+    required: false
+    default: '192.168.1.3'
+  authentik-url:
+    description: 'Authentik base URL'
+    required: false
+    default: 'https://auth.shinbunbun.com'
+  authentik-client-id:
+    description: 'Authentik provider client ID'
+    required: true
+
+outputs:
+  lease-id:
+    description: 'Lease ID'
+  client-ip:
+    description: 'Assigned client IP address'
+
+runs:
+  using: 'node20'
+  main: 'dist/setup/index.js'
+  post: 'dist/teardown/index.js'
+  post-if: 'always()'

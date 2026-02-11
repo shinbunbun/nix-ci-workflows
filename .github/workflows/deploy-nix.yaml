@@ -128,7 +128,7 @@ jobs:
 
       - name: Deploy with deploy-rs
         run: |
-          nix run .#deploy-rs -- \
+          nix run github:shinbunbun/nix-ci-workflows#deploy-rs -- \
             --skip-checks \
             ${{ inputs.deploy-target }}
 

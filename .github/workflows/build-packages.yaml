@@ -119,28 +119,15 @@ jobs:
       - name: Configure and push to Attic cache
         if: inputs.use-attic && inputs.push-to-cache && github.event_name == 'push'
         run: |
-          # atticがビルド対象に含まれていればローカルビルド済みのものを使用
-          if [[ -L "result-pkg-attic" ]]; then
-            ATTIC_CLI="./result-pkg-attic/bin/attic"
-          else
-            nix build .#attic --out-link attic-cli 2>/dev/null || \
-              nix build ".#packages.${{ inputs.system }}.attic" --out-link attic-cli 2>/dev/null || true
-            if [[ -L "attic-cli" ]]; then
-              ATTIC_CLI="./attic-cli/bin/attic"
-            else
-              echo "Attic CLI not available, skipping cache push"
-              exit 0
-            fi
-          fi
-
-          $ATTIC_CLI login ci "${{ inputs.attic-server }}" ${{ secrets.ATTIC_TOKEN }}
-          $ATTIC_CLI cache create main || echo "Cache already exists"
+          ATTIC="nix run github:shinbunbun/nix-ci-workflows#attic --"
+          $ATTIC login ci "${{ inputs.attic-server }}" ${{ secrets.ATTIC_TOKEN }}
+          $ATTIC cache create main || echo "Cache already exists"
 
           # 全パッケージをキャッシュにプッシュ
           for link in result-pkg-*; do
             if [[ -L "$link" ]]; then
               echo "Pushing $link to cache..."
-              $ATTIC_CLI push -j 3 main "$link" || echo "Failed to push $link (non-fatal)"
+              $ATTIC push -j 3 main "$link" || echo "Failed to push $link (non-fatal)"
             fi
           done
         continue-on-error: true

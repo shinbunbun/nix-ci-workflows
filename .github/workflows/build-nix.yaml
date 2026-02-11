@@ -132,18 +132,10 @@ jobs:
       - name: Configure and push to Attic cache
         if: inputs.use-attic && inputs.push-to-cache && github.event_name == 'push'
         run: |
-          nix build .#attic --out-link attic-cli 2>/dev/null || \
-            nix build .#packages.x86_64-linux.attic --out-link attic-cli 2>/dev/null || \
-            nix build .#packages.aarch64-darwin.attic --out-link attic-cli 2>/dev/null || true
-
-          if [[ ! -L attic-cli ]]; then
-            echo "Attic CLI not available, skipping cache push"
-            exit 0
-          fi
-
-          ./attic-cli/bin/attic login ci "${{ inputs.attic-server }}" ${{ secrets.ATTIC_TOKEN }}
-          ./attic-cli/bin/attic cache create main || echo "Cache already exists"
+          ATTIC="nix run github:shinbunbun/nix-ci-workflows#attic --"
+          $ATTIC login ci "${{ inputs.attic-server }}" ${{ secrets.ATTIC_TOKEN }}
+          $ATTIC cache create main || echo "Cache already exists"
 
           echo "Pushing build result to cache..."
-          ./attic-cli/bin/attic push -j 3 main "result-${{ inputs.result-name }}" || echo "Failed to push build result (non-fatal)"
+          $ATTIC push -j 3 main "result-${{ inputs.result-name }}" || echo "Failed to push build result (non-fatal)"
         continue-on-error: true

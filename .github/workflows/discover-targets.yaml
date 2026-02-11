@@ -1,20 +1,17 @@
 # Flakeターゲット自動検出 Reusable Workflow
 #
 # nix eval でflakeのNixOS/Darwin設定名とパッケージリストを動的に検出する。
-# 検出結果はoutputsとしてmatrix strategyやbuild-packages等に渡せる。
+# 検出結果はoutputsとしてmatrix strategyに渡せる。
 #
 # 使用方法:
 #   uses: shinbunbun/nix-ci-workflows/.github/workflows/discover-targets.yaml@main
 #
-# outputs:
-#   nixos-matrix:       '{"configuration":["homeMachine"]}' (matrix用JSON)
-#   darwin-matrix:      '{"configuration":["mx-macbook"]}' (matrix用JSON)
-#   has-nixos:          'true' / 'false'
-#   has-darwin:         'true' / 'false'
-#   linux-packages:     '["attic","deploy-rs"]' (JSON配列)
-#   darwin-packages:    '["attic"]' (JSON配列)
-#   has-linux-packages: 'true' / 'false'
-#   has-darwin-packages:'true' / 'false'
+# outputs (全てmatrix strategy用JSON):
+#   nixos-matrix:           '{"configuration":["homeMachine"]}'
+#   darwin-matrix:          '{"configuration":["mx-macbook"]}'
+#   linux-packages-matrix:  '{"package":["attic","deploy-rs"]}'
+#   darwin-packages-matrix: '{"package":["attic"]}'
+#   has-nixos / has-darwin / has-linux-packages / has-darwin-packages: 'true' / 'false'
 
 name: Discover Flake Targets
 
@@ -32,18 +29,18 @@ on:
       darwin-matrix:
         description: 'Darwin configurations matrix JSON'
         value: ${{ jobs.discover.outputs.darwin-matrix }}
+      linux-packages-matrix:
+        description: 'Linux packages matrix JSON'
+        value: ${{ jobs.discover.outputs.linux-packages-matrix }}
+      darwin-packages-matrix:
+        description: 'Darwin packages matrix JSON'
+        value: ${{ jobs.discover.outputs.darwin-packages-matrix }}
       has-nixos:
         description: 'Whether NixOS configurations exist'
         value: ${{ jobs.discover.outputs.has-nixos }}
       has-darwin:
         description: 'Whether Darwin configurations exist'
         value: ${{ jobs.discover.outputs.has-darwin }}
-      linux-packages:
-        description: 'Linux packages JSON array'
-        value: ${{ jobs.discover.outputs.linux-packages }}
-      darwin-packages:
-        description: 'Darwin packages JSON array'
-        value: ${{ jobs.discover.outputs.darwin-packages }}
       has-linux-packages:
         description: 'Whether Linux packages exist'
         value: ${{ jobs.discover.outputs.has-linux-packages }}
@@ -57,10 +54,10 @@ jobs:
     outputs:
       nixos-matrix: ${{ steps.detect.outputs.nixos-matrix }}
       darwin-matrix: ${{ steps.detect.outputs.darwin-matrix }}
+      linux-packages-matrix: ${{ steps.detect.outputs.linux-packages-matrix }}
+      darwin-packages-matrix: ${{ steps.detect.outputs.darwin-packages-matrix }}
       has-nixos: ${{ steps.detect.outputs.has-nixos }}
       has-darwin: ${{ steps.detect.outputs.has-darwin }}
-      linux-packages: ${{ steps.detect.outputs.linux-packages }}
-      darwin-packages: ${{ steps.detect.outputs.darwin-packages }}
       has-linux-packages: ${{ steps.detect.outputs.has-linux-packages }}
       has-darwin-packages: ${{ steps.detect.outputs.has-darwin-packages }}
     steps:
@@ -85,6 +82,8 @@ jobs:
           # matrix用JSONを生成
           echo "nixos-matrix={\"configuration\":$NIXOS}" >> "$GITHUB_OUTPUT"
           echo "darwin-matrix={\"configuration\":$DARWIN}" >> "$GITHUB_OUTPUT"
+          echo "linux-packages-matrix={\"package\":$LINUX_PKGS}" >> "$GITHUB_OUTPUT"
+          echo "darwin-packages-matrix={\"package\":$DARWIN_PKGS}" >> "$GITHUB_OUTPUT"
 
           # 空配列チェック
           NIXOS_COUNT=$(echo "$NIXOS" | jq 'length')
@@ -96,9 +95,6 @@ jobs:
           echo "has-darwin=$( [ "$DARWIN_COUNT" -gt 0 ] && echo true || echo false )" >> "$GITHUB_OUTPUT"
           echo "has-linux-packages=$( [ "$LINUX_PKGS_COUNT" -gt 0 ] && echo true || echo false )" >> "$GITHUB_OUTPUT"
           echo "has-darwin-packages=$( [ "$DARWIN_PKGS_COUNT" -gt 0 ] && echo true || echo false )" >> "$GITHUB_OUTPUT"
-
-          echo "linux-packages=$LINUX_PKGS" >> "$GITHUB_OUTPUT"
-          echo "darwin-packages=$DARWIN_PKGS" >> "$GITHUB_OUTPUT"
 
           # デバッグ出力
           echo "NixOS configurations: $NIXOS"

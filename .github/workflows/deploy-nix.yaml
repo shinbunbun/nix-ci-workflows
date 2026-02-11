@@ -133,18 +133,30 @@ jobs:
             ${{ inputs.deploy-target }}
 
       - name: Notify deployment success
-        if: success() && secrets.DISCORD_WEBHOOK_URL != ''
+        if: success()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          curl -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+          if [[ -z "$DISCORD_WEBHOOK_URL" ]]; then
+            echo "Discord webhook not configured, skipping notification"
+            exit 0
+          fi
+          curl -X POST "$DISCORD_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -d "{
               \"content\": \"🚀 **デプロイ成功**\\n\\nTarget: \`${{ inputs.deploy-target }}\`\\nCommit: \`${{ github.sha }}\`\\nhttps://github.com/${{ github.repository }}/commit/${{ github.sha }}\"
             }"
 
       - name: Notify deployment failure
-        if: failure() && secrets.DISCORD_WEBHOOK_URL != ''
+        if: failure()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          curl -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+          if [[ -z "$DISCORD_WEBHOOK_URL" ]]; then
+            echo "Discord webhook not configured, skipping notification"
+            exit 0
+          fi
+          curl -X POST "$DISCORD_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -d "{
               \"content\": \"❌ **デプロイ失敗**\\n\\nTarget: \`${{ inputs.deploy-target }}\`\\nLogs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"

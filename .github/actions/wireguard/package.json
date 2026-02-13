@@ -5,8 +5,8 @@
   "private": true,
   "scripts": {
     "build": "npm run build:setup && npm run build:teardown",
-    "build:setup": "ncc build src/setup.js -o dist/setup",
-    "build:teardown": "ncc build src/teardown.js -o dist/teardown"
+    "build:setup": "ncc build src/setup.js -o dist/setup && cp setup.sh dist/setup/setup.sh",
+    "build:teardown": "ncc build src/teardown.js -o dist/teardown && cp teardown.sh dist/teardown/teardown.sh"
   },
   "dependencies": {
     "@actions/core": "^1.10.1",

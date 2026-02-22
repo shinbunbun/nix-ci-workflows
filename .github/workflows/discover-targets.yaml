@@ -22,6 +22,10 @@ on:
         description: 'GitHub Actions runner'
         type: string
         default: 'ubuntu-latest'
+      skip-nix-install:
+        description: 'Skip Nix installation (for self-hosted NixOS runners)'
+        type: boolean
+        default: false
     outputs:
       nixos-matrix:
         description: 'NixOS configurations matrix JSON'
@@ -50,7 +54,7 @@ on:
 
 jobs:
   discover:
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
     outputs:
       nixos-matrix: ${{ steps.detect.outputs.nixos-matrix }}
       darwin-matrix: ${{ steps.detect.outputs.darwin-matrix }}
@@ -63,6 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Nix with flakes enabled
+        if: ${{ !inputs.skip-nix-install }}
         uses: cachix/install-nix-action@v31
         with:
           nix_path: nixpkgs=channel:nixos-unstable

@@ -149,7 +149,7 @@ jobs:
           # DynamicUser環境ではSSHがgetpwuid()で~を/に解決するため、
           # deploy-rsやnixが内部でsshを呼ぶ際にconfigが見つからない。
           # SSHラッパーで全てのSSH呼び出しに-Fを付与する。
-          REAL_SSH=$(which ssh)
+          REAL_SSH=$(command -v ssh)
           SSH_WRAPPER_DIR="${HOME}/.local/bin"
           mkdir -p "${SSH_WRAPPER_DIR}"
           cat > "${SSH_WRAPPER_DIR}/ssh" << WRAPPER_EOF

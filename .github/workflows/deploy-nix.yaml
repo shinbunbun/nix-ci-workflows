@@ -146,14 +146,26 @@ jobs:
             StrictHostKeyChecking no
           EOF
 
+          # DynamicUser環境ではSSHがgetpwuid()で~を/に解決するため、
+          # deploy-rsやnixが内部でsshを呼ぶ際にconfigが見つからない。
+          # SSHラッパーで全てのSSH呼び出しに-Fを付与する。
+          REAL_SSH=$(which ssh)
+          SSH_WRAPPER_DIR="${HOME}/.local/bin"
+          mkdir -p "${SSH_WRAPPER_DIR}"
+          cat > "${SSH_WRAPPER_DIR}/ssh" << WRAPPER_EOF
+          #!/usr/bin/env bash
+          exec ${REAL_SSH} -F ${HOME}/.ssh/config "\$@"
+          WRAPPER_EOF
+          chmod +x "${SSH_WRAPPER_DIR}/ssh"
+          echo "${SSH_WRAPPER_DIR}" >> $GITHUB_PATH
+
       - name: Test SSH connectivity
         run: |
-          ssh -F ~/.ssh/config ${{ inputs.ssh-hostname }} 'echo "SSH connection via WireGuard OK"'
+          ssh ${{ inputs.ssh-hostname }} 'echo "SSH connection via WireGuard OK"'
         timeout-minutes: 2
 
       - name: Deploy with deploy-rs
         run: |
-          export GIT_SSH_COMMAND="ssh -F ~/.ssh/config"
           nix run github:shinbunbun/nix-ci-workflows#deploy-rs -- \
             --skip-checks \
             ${{ inputs.deploy-target }}

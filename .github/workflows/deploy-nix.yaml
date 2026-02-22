@@ -141,7 +141,8 @@ jobs:
             HostName ${{ inputs.ssh-host }}
             Port ${{ inputs.ssh-port }}
             User ${{ inputs.ssh-user }}
-            IdentityFile ~/.ssh/deploy_key
+            IdentityFile ${HOME}/.ssh/deploy_key
+            UserKnownHostsFile ${HOME}/.ssh/known_hosts
             StrictHostKeyChecking no
           EOF
 

@@ -147,11 +147,12 @@ jobs:
 
       - name: Test SSH connectivity
         run: |
-          ssh ${{ inputs.ssh-hostname }} 'echo "SSH connection via WireGuard OK"'
+          ssh -F ~/.ssh/config ${{ inputs.ssh-hostname }} 'echo "SSH connection via WireGuard OK"'
         timeout-minutes: 2
 
       - name: Deploy with deploy-rs
         run: |
+          export GIT_SSH_COMMAND="ssh -F ~/.ssh/config"
           nix run github:shinbunbun/nix-ci-workflows#deploy-rs -- \
             --skip-checks \
             ${{ inputs.deploy-target }}

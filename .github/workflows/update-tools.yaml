@@ -62,8 +62,8 @@ jobs:
           ./result-attic/bin/attic cache create main || echo "Cache already exists"
 
           echo "Pushing attic to cache..."
-          ./result-attic/bin/attic push -j 3 main result-attic || echo "Failed to push attic (non-fatal)"
+          ./result-attic/bin/attic push -j 5 main result-attic || echo "Failed to push attic (non-fatal)"
 
           echo "Pushing deploy-rs to cache..."
-          ./result-attic/bin/attic push -j 3 main result-deploy-rs || echo "Failed to push deploy-rs (non-fatal)"
+          ./result-attic/bin/attic push -j 5 main result-deploy-rs || echo "Failed to push deploy-rs (non-fatal)"
         continue-on-error: true

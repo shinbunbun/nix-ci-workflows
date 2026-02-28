@@ -184,11 +184,24 @@ echo ""
 echo "=== Network Diagnostics ==="
 
 echo "--- WireGuard Interface Info ---"
-sudo wg show wg-ci 2>/dev/null || echo "Could not query wg-ci interface"
+if [[ "$RUNNER_OS" == "Linux" ]]; then
+  sudo wg show wg-ci 2>/dev/null || echo "Could not query wg-ci interface"
+else
+  sudo wg show 2>/dev/null || echo "Could not query WireGuard interface"
+fi
 
 echo ""
 echo "--- Interface MTU ---"
-ip link show wg-ci 2>/dev/null | grep -o 'mtu [0-9]*' || echo "Could not read MTU"
+if [[ "$RUNNER_OS" == "Linux" ]]; then
+  ip link show wg-ci 2>/dev/null | grep -o 'mtu [0-9]*' || echo "Could not read MTU"
+else
+  WG_IFACE=$(sudo wg show interfaces 2>/dev/null | head -1)
+  if [[ -n "${WG_IFACE:-}" ]]; then
+    ifconfig "$WG_IFACE" 2>/dev/null | grep -o 'mtu [0-9]*' || echo "Could not read MTU"
+  else
+    echo "Could not determine WireGuard interface"
+  fi
+fi
 
 echo ""
 echo "--- Ping RTT Statistics (10 packets) ---"
@@ -202,7 +215,11 @@ curl -sS --connect-timeout 10 --max-time 15 -o /dev/null \
 
 echo ""
 echo "--- MTU Path Discovery (1392 byte payload, DF bit) ---"
-ping -c 3 -M do -s 1392 "$ATTIC_HOST" 2>&1 || echo "MTU path discovery: 1392 byte packets failed (possible MTU issue)"
+if [[ "$RUNNER_OS" == "Linux" ]]; then
+  ping -c 3 -M do -s 1392 "$ATTIC_HOST" 2>&1 || echo "MTU path discovery: 1392 byte packets failed (possible MTU issue)"
+else
+  ping -c 3 -D -s 1392 "$ATTIC_HOST" 2>&1 || echo "MTU path discovery: 1392 byte packets failed (possible MTU issue)"
+fi
 
 echo "=== End Diagnostics ==="
 echo ""

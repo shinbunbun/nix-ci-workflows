@@ -156,5 +156,5 @@ jobs:
           $ATTIC cache create main || echo "Cache already exists"
 
           echo "Pushing build result to cache..."
-          $ATTIC push -j 3 main "result-${{ inputs.result-name }}" || echo "Failed to push build result (non-fatal)"
+          $ATTIC push -j 5 main "result-${{ inputs.result-name }}" || echo "Failed to push build result (non-fatal)"
         continue-on-error: true

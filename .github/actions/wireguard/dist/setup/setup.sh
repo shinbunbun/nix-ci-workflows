@@ -179,6 +179,34 @@ else
   exit 1
 fi
 
+# --- ネットワーク診断 ---
+echo ""
+echo "=== Network Diagnostics ==="
+
+echo "--- WireGuard Interface Info ---"
+sudo wg show wg-ci 2>/dev/null || echo "Could not query wg-ci interface"
+
+echo ""
+echo "--- Interface MTU ---"
+ip link show wg-ci 2>/dev/null | grep -o 'mtu [0-9]*' || echo "Could not read MTU"
+
+echo ""
+echo "--- Ping RTT Statistics (10 packets) ---"
+ping -c 10 "$ATTIC_HOST" 2>&1 | tail -2 || echo "Ping failed"
+
+echo ""
+echo "--- HTTP Connection Timing ---"
+curl -sS --connect-timeout 10 --max-time 15 -o /dev/null \
+  -w "DNS: %{time_namelookup}s\nConnect: %{time_connect}s\nTotal: %{time_total}s\nSpeed: %{speed_download} bytes/s\n" \
+  "http://${ATTIC_HOST}:8080/" || echo "Curl timing test failed"
+
+echo ""
+echo "--- MTU Path Discovery (1392 byte payload, DF bit) ---"
+ping -c 3 -M do -s 1392 "$ATTIC_HOST" 2>&1 || echo "MTU path discovery: 1392 byte packets failed (possible MTU issue)"
+
+echo "=== End Diagnostics ==="
+echo ""
+
 # --- 結果を出力 ---
 echo "LEASE_ID=$LEASE_ID" >> "$GITHUB_OUTPUT_FILE"
 echo "CLIENT_IP=$CLIENT_IP" >> "$GITHUB_OUTPUT_FILE"

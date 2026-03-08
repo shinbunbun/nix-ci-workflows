@@ -125,7 +125,7 @@ PrivateKey = $PRIVATE_KEY
 [Peer]
 PublicKey = $SERVER_PUBKEY
 Endpoint = $ENDPOINT
-AllowedIPs = ${ATTIC_HOST}/32,192.168.1.4/32
+AllowedIPs = ${ATTIC_HOST}/32,192.168.1.4/32,192.168.1.5/32
 PersistentKeepalive = $KEEPALIVE
 EOF
 
@@ -137,6 +137,7 @@ EOF
   sudo ip link set wg-ci up
   sudo ip route add "${ATTIC_HOST}/32" dev wg-ci
   sudo ip route add "192.168.1.4/32" dev wg-ci
+  sudo ip route add "192.168.1.5/32" dev wg-ci
 
 elif [[ "$RUNNER_OS" == "macOS" ]]; then
   sudo mkdir -p /etc/wireguard
@@ -149,7 +150,7 @@ MTU = $MTU
 [Peer]
 PublicKey = $SERVER_PUBKEY
 Endpoint = $ENDPOINT
-AllowedIPs = ${ATTIC_HOST}/32,192.168.1.4/32
+AllowedIPs = ${ATTIC_HOST}/32,192.168.1.4/32,192.168.1.5/32
 PersistentKeepalive = $KEEPALIVE
 EOF
 

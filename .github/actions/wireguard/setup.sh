@@ -161,6 +161,31 @@ fi
 
 echo "WireGuard interface configured"
 
+# --- ハンドシェイク完了待機 ---
+# `wg-quick up` 直後にデータパケットを送ると、WireGuard の handshake が
+# 確立する前のパケットが server 側で drop され tx-error を加算する。
+# 最大 10 秒、handshake が成立するまで polling する。
+echo "Waiting for WireGuard handshake completion (max 10s)..."
+HANDSHAKE_OK=0
+for _ in $(seq 1 20); do
+  if [[ "$RUNNER_OS" == "Linux" ]]; then
+    LATEST=$(sudo wg show wg-ci latest-handshakes 2>/dev/null | awk '{print $2}' | head -1)
+  else
+    LATEST=$(sudo wg show wg-ci latest-handshakes 2>/dev/null | awk '{print $2}' | head -1)
+  fi
+  if [[ -n "$LATEST" && "$LATEST" -gt 0 ]]; then
+    NOW=$(date +%s)
+    AGE=$((NOW - LATEST))
+    echo "Handshake established (${AGE}s ago)"
+    HANDSHAKE_OK=1
+    break
+  fi
+  sleep 0.5
+done
+if [[ "$HANDSHAKE_OK" -eq 0 ]]; then
+  echo "::warning::Handshake did not complete within 10s, proceeding anyway"
+fi
+
 # --- 接続確認 ---
 echo "Testing connectivity to $ATTIC_HOST..."
 if ping -c 3 "$ATTIC_HOST"; then

@@ -165,15 +165,15 @@ echo "WireGuard interface configured"
 # `wg-quick up` 直後にデータパケットを送ると、WireGuard の handshake が
 # 確立する前のパケットが server 側で drop され tx-error を加算する。
 # 最大 10 秒、handshake が成立するまで polling する。
+#
+# macOS (wireguard-go) では sudo 経由で wg が参照できない、出力形式が
+# 異なるなど不安定要因が多いため `|| true` で pipefail を吸収し、
+# 取得失敗時は空文字として timeout の挙動 (::warning:: 後 ping へ fall through) に任せる。
 echo "Waiting for WireGuard handshake completion (max 10s)..."
 HANDSHAKE_OK=0
 for _ in $(seq 1 20); do
-  if [[ "$RUNNER_OS" == "Linux" ]]; then
-    LATEST=$(sudo wg show wg-ci latest-handshakes 2>/dev/null | awk '{print $2}' | head -1)
-  else
-    LATEST=$(sudo wg show wg-ci latest-handshakes 2>/dev/null | awk '{print $2}' | head -1)
-  fi
-  if [[ -n "$LATEST" && "$LATEST" -gt 0 ]]; then
+  LATEST=$(sudo wg show wg-ci latest-handshakes 2>/dev/null | awk 'NR==1{print $2}' || true)
+  if [[ -n "${LATEST:-}" ]] && [[ "$LATEST" =~ ^[0-9]+$ ]] && [[ "$LATEST" -gt 0 ]]; then
     NOW=$(date +%s)
     AGE=$((NOW - LATEST))
     echo "Handshake established (${AGE}s ago)"

@@ -66,6 +66,11 @@ on:
         required: false
         type: boolean
         default: false
+      max-jobs:
+        description: 'Nix --max-jobs value. Empty = Nix default. Set to "1" to serialize builds (workaround for macos-latest GitHub-hosted parallel-build deadlock).'
+        required: false
+        type: string
+        default: ''
     secrets:
       AUTHENTIK_CLIENT_ID:
         required: false
@@ -142,11 +147,18 @@ jobs:
           fi
 
       - name: Build Nix target
+        env:
+          MAX_JOBS: ${{ inputs.max-jobs }}
         run: |
+          args=()
+          if [ -n "$MAX_JOBS" ]; then
+            args+=(--max-jobs "$MAX_JOBS")
+          fi
           nix build "${{ inputs.build-target }}" \
             --print-build-logs \
             --show-trace \
-            --out-link "result-${{ inputs.result-name }}"
+            --out-link "result-${{ inputs.result-name }}" \
+            "${args[@]}"
 
       - name: Configure and push to Attic cache
         if: inputs.use-attic && inputs.push-to-cache && github.event_name == 'push'

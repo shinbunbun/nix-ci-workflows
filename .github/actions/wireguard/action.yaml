@@ -29,7 +29,7 @@ outputs:
     description: 'Assigned client IP address'
 
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'dist/setup/index.js'
   post: 'dist/teardown/index.js'
   post-if: 'always()'

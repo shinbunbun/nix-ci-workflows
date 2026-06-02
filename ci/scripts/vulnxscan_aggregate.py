@@ -55,13 +55,15 @@ for path in sorted(glob.glob(os.path.join(signals_dir, "**", "notify.json"), rec
             continue
         e = agg.setdefault(
             vid,
-            {"severity": "", "packages": set(), "classifies": set(), "targets": set(), "patch": set()},
+            {"severity": "", "packages": set(), "classifies": set(), "targets": set(), "cur": set(), "patch": set()},
         )
         if sevf(fdg.get("severity")) > sevf(e["severity"]):
             e["severity"] = fdg.get("severity") or ""
         e["packages"].add(fdg.get("package", ""))
         e["classifies"].add(fdg.get("classify", ""))
         e["targets"].add(target)
+        if fdg.get("version_local"):
+            e["cur"].add(fdg.get("version_local"))
         if fdg.get("version_nixpkgs"):
             e["patch"].add(fdg.get("version_nixpkgs"))
 
@@ -89,16 +91,16 @@ lines = [
     "",
 ]
 if fixable:
-    lines += ["### 🔧 fixable — pin 解消・更新で直る", "", "| CVE | sev | pkg | → パッチ版 | 影響ターゲット |", "|---|---|---|---|---|"]
+    lines += ["### 🔧 fixable — pin 解消・更新で直る", "", "| CVE | sev | pkg | 現在版 | → パッチ版 | 影響ターゲット |", "|---|---|---|---|---|---|"]
     for vid, e in fixable:
         url = f"https://nvd.nist.gov/vuln/detail/{vid}"
-        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['patch'])} | {joinset(e['targets'])} |")
+        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['patch'])} | {joinset(e['targets'])} |")
     lines.append("")
 if nofix:
-    lines += ["### 🛑 no-fix — 修正版なし (mitigation/受容/待ち)", "", "| CVE | sev | pkg | 影響ターゲット |", "|---|---|---|---|"]
+    lines += ["### 🛑 no-fix — 修正版なし (mitigation/受容/待ち)", "", "| CVE | sev | pkg | 現在版 | 影響ターゲット |", "|---|---|---|---|---|"]
     for vid, e in nofix:
         url = f"https://nvd.nist.gov/vuln/detail/{vid}"
-        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['targets'])} |")
+        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['targets'])} |")
     lines.append("")
 if not items:
     lines.append("✅ 現在 NOTIFY 対象の脆弱性はありません。")

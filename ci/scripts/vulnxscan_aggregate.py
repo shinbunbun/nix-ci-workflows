@@ -4,7 +4,8 @@
 usage: vulnxscan_aggregate.py <signals_dir>
 
 <signals_dir> 配下の */notify.json (download-artifact が artifact ごとに作るサブdir) を読み、
-vuln_id で dedup (影響ターゲットを列挙) して、ラベル付き Issue を find-or-create-or-update する。
+vuln_id で dedup (影響ターゲット列挙) して、🔧 fixable / 🛑 no-fix に分けた本文で
+ラベル付き Issue を find-or-create-or-update する。
 
 env:
   GITHUB_TOKEN       無い場合は dry-run (body を stdout 出力して終了)
@@ -14,6 +15,7 @@ env:
 import glob
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -32,6 +34,12 @@ def sevf(x):
         return 0.0
 
 
+def short_target(t):
+    """'.#nixosConfigurations.nixos-desktop.config...' -> 'nixos-desktop' (表示短縮)。"""
+    m = re.search(r"(?:nixos|darwin)Configurations\.([^.]+)", t)
+    return m.group(1) if m else t
+
+
 # --- notify.json 収集 + vuln_id で dedup ---
 agg = {}
 for path in sorted(glob.glob(os.path.join(signals_dir, "**", "notify.json"), recursive=True)):
@@ -40,42 +48,62 @@ for path in sorted(glob.glob(os.path.join(signals_dir, "**", "notify.json"), rec
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
         continue
-    target = data.get("target", "?")
+    target = short_target(data.get("target", "?"))
     for fdg in data.get("findings", []):
         vid = fdg.get("vuln_id", "")
         if not vid:
             continue
         e = agg.setdefault(
             vid,
-            {"severity": "", "packages": set(), "classifies": set(), "targets": set()},
+            {"severity": "", "packages": set(), "classifies": set(), "targets": set(), "patch": set()},
         )
         if sevf(fdg.get("severity")) > sevf(e["severity"]):
             e["severity"] = fdg.get("severity") or ""
         e["packages"].add(fdg.get("package", ""))
         e["classifies"].add(fdg.get("classify", ""))
         e["targets"].add(target)
+        if fdg.get("version_nixpkgs"):
+            e["patch"].add(fdg.get("version_nixpkgs"))
 
 items = sorted(agg.items(), key=lambda kv: -sevf(kv[1]["severity"]))
+fixable = [(v, e) for v, e in items if "fix_update_to_version_nixpkgs" in e["classifies"]]
+nofix = [(v, e) for v, e in items if "fix_update_to_version_nixpkgs" not in e["classifies"]]
+
+
+def joinset(s):
+    return ",".join(sorted(x for x in s if x))
+
 
 # --- body 生成 ---
 ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M %Z")
 lines = [
     MARKER,
     "",
-    f"自動生成 (最終更新: {ts})。vulnxscan の **NOTIFY** (latest nixpkgs でも残る = 要対処/mitigation) を集約。",
+    f"自動生成 (最終更新: {ts})。vulnxscan の **NOTIFY** (latest nixpkgs でも残る = 要対処) を集約。",
+    "",
+    "> **凡例** — 🔧 **fixable**: nixpkgs に修正版あり、pin 解消/更新で直る（パッチ版明記）。"
+    " 🛑 **no-fix**: 修正版が存在しない → Remove/Replace/Mitigate/受容(whitelist.csv)/upstream 待ち。"
+    " auto-update で直る分(INFO)と誤検知(DROP)は除外済。詳細分類は各 run の job summary 参照。",
+    "",
+    f"**NOTIFY: {len(items)} CVE** (🔧 fixable {len(fixable)} / 🛑 no-fix {len(nofix)})",
     "",
 ]
-if items:
-    lines += [f"**NOTIFY: {len(items)} CVE**", "", "| CVE | sev | pkg | classify | 影響ターゲット |", "|---|---|---|---|---|"]
-    for vid, e in items:
+if fixable:
+    lines += ["### 🔧 fixable — pin 解消・更新で直る", "", "| CVE | sev | pkg | → パッチ版 | 影響ターゲット |", "|---|---|---|---|---|"]
+    for vid, e in fixable:
         url = f"https://nvd.nist.gov/vuln/detail/{vid}"
-        lines.append(
-            f"| [{vid}]({url}) | {e['severity']} | {','.join(sorted(p for p in e['packages'] if p))} "
-            f"| {','.join(sorted(c for c in e['classifies'] if c))} | {','.join(sorted(e['targets']))} |"
-        )
-    lines += ["", "> 確定FP/リスク受容は whitelist.csv に追記すると以降抑制されます。"]
-else:
+        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['patch'])} | {joinset(e['targets'])} |")
+    lines.append("")
+if nofix:
+    lines += ["### 🛑 no-fix — 修正版なし (mitigation/受容/待ち)", "", "| CVE | sev | pkg | 影響ターゲット |", "|---|---|---|---|"]
+    for vid, e in nofix:
+        url = f"https://nvd.nist.gov/vuln/detail/{vid}"
+        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['targets'])} |")
+    lines.append("")
+if not items:
     lines.append("✅ 現在 NOTIFY 対象の脆弱性はありません。")
+else:
+    lines.append("> 確定FP/リスク受容は whitelist.csv に追記すると以降抑制されます。")
 body = "\n".join(lines)
 
 repo = os.environ.get("GITHUB_REPOSITORY")
@@ -105,21 +133,20 @@ def req(method, path, payload=None):
         return ex.code, None
 
 
-# ラベルを保証
-st, _ = req("GET", f"/repos/{repo}/labels/{LABEL}")
-if st == 404:
-    req("POST", f"/repos/{repo}/labels", {"name": LABEL, "color": "b60205", "description": "vulnxscan 自動脆弱性レポート"})
-
 def ok(status):
     return 200 <= status < 300
 
 
 def must(status, action):
-    # mutating 失敗を握り潰さない (silent green 回避)
     if not ok(status):
         print(f"::error::{action} に失敗しました (status={status})")
         sys.exit(1)
 
+
+# ラベルを保証
+st, _ = req("GET", f"/repos/{repo}/labels/{LABEL}")
+if st == 404:
+    req("POST", f"/repos/{repo}/labels", {"name": LABEL, "color": "b60205", "description": "vulnxscan 自動脆弱性レポート"})
 
 # 既存 open issue (PR は除外)。GET 失敗時は重複起票を避けるため中断する。
 st, issues = req("GET", f"/repos/{repo}/issues?labels={LABEL}&state=open&per_page=100")

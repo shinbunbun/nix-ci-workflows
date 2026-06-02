@@ -1,0 +1,117 @@
+# Nix 脆弱性スキャン Reusable Workflow
+#
+# vulnxscan (vulnix + grype + osv の aggregator) で Nix flake target の
+# runtime closure をスキャンし、結果を job summary に出力する (report-only)。
+#
+# 使用方法 (caller 側で discover-targets と組み合わせて fan-out):
+#   scan-nixos:
+#     needs: discover
+#     if: needs.discover.outputs.has-nixos == 'true'
+#     strategy:
+#       matrix: ${{ fromJSON(needs.discover.outputs.nixos-matrix) }}
+#     uses: shinbunbun/nix-ci-workflows/.github/workflows/scan-vulnerabilities.yaml@main
+#     with:
+#       runner: '["self-hosted", "nixos", "x86_64-linux"]'
+#       skip-nix-install: true
+#       target: ".#nixosConfigurations.${{ matrix.configuration }}.config.system.build.toplevel"
+#   scan-darwin:
+#     ...
+#     with:
+#       runner: '["self-hosted", "darwin", "aarch64-darwin"]'
+#       vulnix-nocheck: true   # darwin は vulnix の checkPhase が sandbox 非互換のため必須
+#       target: ".#darwinConfigurations.${{ matrix.configuration }}.config.system.build.toplevel"
+
+name: Scan Vulnerabilities
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'GitHub Actions runner (string か JSON 配列)'
+        type: string
+        default: 'ubuntu-latest'
+      target:
+        description: 'スキャン対象の Nix flake target (runtime closure)'
+        type: string
+        required: true
+      triage:
+        description: 'repology triage 分類を実行する'
+        type: boolean
+        default: true
+      vulnix-nocheck:
+        description: 'vulnix を doCheck/checkPhase 無効版に差し替える (darwin で必須)'
+        type: boolean
+        default: false
+      whitelist:
+        description: 'caller repo 内の vulnxscan whitelist CSV パス (空なら無効)'
+        type: string
+        default: ''
+      skip-nix-install:
+        description: 'Nix インストールをスキップ (self-hosted NixOS/Darwin runner 用)'
+        type: boolean
+        default: false
+      ci-workflows-ref:
+        description: 'helper (script/flake) を取得する nix-ci-workflows の ref'
+        type: string
+        default: 'main'
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
+    steps:
+      - name: Checkout target repo
+        uses: actions/checkout@v6
+
+      - name: Checkout nix-ci-workflows helpers
+        uses: actions/checkout@v6
+        with:
+          repository: shinbunbun/nix-ci-workflows
+          ref: ${{ inputs.ci-workflows-ref }}
+          path: .nix-ci-workflows
+
+      - name: Install Nix with flakes enabled
+        if: ${{ !inputs.skip-nix-install }}
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            access-tokens = github.com=${{ github.token }}
+
+      - name: Run vulnxscan
+        env:
+          TARGET: ${{ inputs.target }}
+          TRIAGE: ${{ inputs.triage }}
+          NOCHECK: ${{ inputs.vulnix-nocheck }}
+          WHITELIST: ${{ inputs.whitelist }}
+        run: |
+          set -euo pipefail
+          ARGS=()
+          [ "$TRIAGE" = "true" ] && ARGS+=(--triage)
+          [ -n "$WHITELIST" ] && ARGS+=(--whitelist "$WHITELIST")
+          OVERRIDE=()
+          if [ "$NOCHECK" = "true" ]; then
+            # darwin: vulnix の checkPhase (pytest の socket/network test) が darwin の
+            # nix build sandbox 非互換でビルド不可のため、doCheck/checkPhase 無効版に差し替える。
+            OVERRIDE=(--override-input vulnix "path:.nix-ci-workflows/ci/vulnix-nocheck")
+          fi
+          # ${ARR[@]+"${ARR[@]}"} 形式で空配列展開を set -u セーフに (bash 3.2 / macOS 対策)
+          nix run github:tiiuae/sbomnix#vulnxscan ${OVERRIDE[@]+"${OVERRIDE[@]}"} -- \
+            "$TARGET" ${ARGS[@]+"${ARGS[@]}"} --out "$RUNNER_TEMP/vulns.csv"
+
+      - name: Build job summary
+        if: always()
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          CSV="$RUNNER_TEMP/vulns.triage.csv"
+          [ -f "$CSV" ] || CSV="$RUNNER_TEMP/vulns.csv"
+          if [ -f "$CSV" ]; then
+            nix run nixpkgs#python3 -- \
+              .nix-ci-workflows/ci/scripts/vulnxscan_summary.py "$CSV" "$TARGET" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## vulnxscan: 出力 CSV なし（スキャン失敗の可能性）" >> "$GITHUB_STEP_SUMMARY"
+          fi

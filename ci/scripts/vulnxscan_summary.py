@@ -98,6 +98,16 @@ for r in rows:
         else:
             info.append(r)
 
+# 集約 (Issue 自動起票) 用に NOTIFY を JSON 出力 (argv[4] が与えられた場合)
+notify_json_path = sys.argv[4] if len(sys.argv) > 4 else None
+if notify_json_path:
+    import json
+
+    keys = ["vuln_id", "severity", "package", "classify", "version_local", "version_nixpkgs"]
+    payload = {"target": target, "findings": [{k: r.get(k, "") for k in keys} for r in notify]}
+    with open(notify_json_path, "w") as jf:
+        json.dump(payload, jf, ensure_ascii=False)
+
 print("## 🔎 vulnxscan 結果\n")
 print(f"- **target**: `{target}`")
 print(f"- **検出**: {total} CVE / {pkgs} packages")

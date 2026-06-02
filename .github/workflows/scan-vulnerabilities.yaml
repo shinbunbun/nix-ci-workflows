@@ -54,6 +54,10 @@ on:
         description: 'helper (script/flake) を取得する nix-ci-workflows の ref'
         type: string
         default: 'main'
+      upload-report:
+        description: 'NOTIFY を artifact (vulnxscan-signal-*) にアップロードする (集約 job 用)'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -121,9 +125,29 @@ jobs:
           CSV="$RUNNER_TEMP/vulns.triage.csv"
           [ -f "$CSV" ] || CSV="$RUNNER_TEMP/vulns.csv"
           if [ -f "$CSV" ]; then
+            # 第4引数 notify.json = NOTIFY を集約 (Issue 起票) 用に JSON 出力
             nix run nixpkgs#python3 -- \
               .nix-ci-workflows/ci/scripts/vulnxscan_summary.py \
-              "$CSV" "$TARGET" "$RUNNER_TEMP/closure.txt" >> "$GITHUB_STEP_SUMMARY"
+              "$CSV" "$TARGET" "$RUNNER_TEMP/closure.txt" "$RUNNER_TEMP/notify.json" \
+              >> "$GITHUB_STEP_SUMMARY"
           else
             echo "## vulnxscan: 出力 CSV なし（スキャン失敗の可能性）" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Compute artifact name
+        if: always() && inputs.upload-report
+        id: artifact
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          safe=$(printf '%s' "$TARGET" | sed 's/[^a-zA-Z0-9._-]/-/g' | cut -c1-100)
+          echo "name=vulnxscan-signal-$safe" >> "$GITHUB_OUTPUT"
+
+      - name: Upload NOTIFY report
+        if: always() && inputs.upload-report && steps.artifact.outputs.name != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ runner.temp }}/notify.json
+          if-no-files-found: ignore

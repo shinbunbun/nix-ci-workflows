@@ -48,6 +48,11 @@ if closure_path:
                 name = line.strip()
                 if not name:
                     continue
+                # raw な `nix path-info -r` 出力 (/nix/store/<hash>-name-ver) なら
+                # store path prefix を除去。strip 済み basename はそのまま使う
+                # (誤って basename 先頭を hash と誤認しないよう、store path の時だけ剥がす)。
+                if name.startswith("/"):
+                    name = re.sub(r"^[a-z0-9]{32}-", "", name.rsplit("/", 1)[-1])
                 m = re.match(r"^(.+?)-(\d[\w.+]*)", name)
                 if m:
                     closure_versions[m.group(1)].add(m.group(2))

@@ -101,6 +101,17 @@ jobs:
           nix run github:tiiuae/sbomnix#vulnxscan ${OVERRIDE[@]+"${OVERRIDE[@]}"} -- \
             "$TARGET" ${ARGS[@]+"${ARGS[@]}"} --out "$RUNNER_TEMP/vulns.csv"
 
+      - name: Capture closure (pin 検出用)
+        if: always()
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          # vulnxscan が target を realise 済みなので path-info は速い。
+          # summary script が pin 検出 (同 package が複数版 = auto-update で直らない) に使う。
+          nix path-info -r "$TARGET" 2>/dev/null \
+            | sed 's#/nix/store/[a-z0-9]*-##' | sort -u > "$RUNNER_TEMP/closure.txt" || true
+
       - name: Build job summary
         if: always()
         env:
@@ -111,7 +122,8 @@ jobs:
           [ -f "$CSV" ] || CSV="$RUNNER_TEMP/vulns.csv"
           if [ -f "$CSV" ]; then
             nix run nixpkgs#python3 -- \
-              .nix-ci-workflows/ci/scripts/vulnxscan_summary.py "$CSV" "$TARGET" >> "$GITHUB_STEP_SUMMARY"
+              .nix-ci-workflows/ci/scripts/vulnxscan_summary.py \
+              "$CSV" "$TARGET" "$RUNNER_TEMP/closure.txt" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "## vulnxscan: 出力 CSV なし（スキャン失敗の可能性）" >> "$GITHUB_STEP_SUMMARY"
           fi

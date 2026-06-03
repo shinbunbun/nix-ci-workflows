@@ -41,7 +41,39 @@ def short_target(t):
 
 
 # --- notify.json 収集 + vuln_id で dedup ---
-agg = {}
+def _new_entry():
+    return {"severity": "", "packages": set(), "classifies": set(), "targets": set(),
+            "cur": set(), "patch": set(), "entry": set(), "base_n": 0}
+
+
+def _accumulate(agg, target, fdg):
+    """1 finding を vuln_id で dedup しながら agg に畳み込む (影響ターゲット列挙)。"""
+    vid = fdg.get("vuln_id", "")
+    if not vid:
+        return
+    e = agg.setdefault(vid, _new_entry())
+    if sevf(fdg.get("severity")) > sevf(e["severity"]):
+        e["severity"] = fdg.get("severity") or ""
+    e["packages"].add(fdg.get("package", ""))
+    e["classifies"].add(fdg.get("classify", ""))
+    e["targets"].add(target)
+    if fdg.get("version_local"):
+        e["cur"].add(fdg.get("version_local"))
+    if fdg.get("version_nixpkgs"):
+        e["patch"].add(fdg.get("version_nixpkgs"))
+    # entry (入口/設定)。"基盤依存 (N 入口)" は target ごとに N が揺れるので、
+    # 個別文字列を set に積まず最大入口数だけ保持して 1 つに集約する。
+    ent = fdg.get("entry") or fdg.get("bundled_by")  # bundled_by は旧 artifact 互換
+    if ent and ent != "—":
+        m = re.fullmatch(r"基盤依存 \((\d+) 入口\)", ent)
+        if m:
+            e["base_n"] = max(e["base_n"], int(m.group(1)))
+        else:
+            e["entry"].add(ent)
+
+
+# NOTIFY / UNKNOWN / spot-check を別集合で集約 (notify.json の各キー、無ければ空)。
+agg_notify, agg_unknown, agg_spot = {}, {}, {}
 for path in sorted(glob.glob(os.path.join(signals_dir, "**", "notify.json"), recursive=True)):
     try:
         with open(path) as f:
@@ -50,36 +82,22 @@ for path in sorted(glob.glob(os.path.join(signals_dir, "**", "notify.json"), rec
         continue
     target = short_target(data.get("target", "?"))
     for fdg in data.get("findings", []):
-        vid = fdg.get("vuln_id", "")
-        if not vid:
-            continue
-        e = agg.setdefault(
-            vid,
-            {"severity": "", "packages": set(), "classifies": set(), "targets": set(),
-             "cur": set(), "patch": set(), "entry": set(), "base_n": 0},
-        )
-        if sevf(fdg.get("severity")) > sevf(e["severity"]):
-            e["severity"] = fdg.get("severity") or ""
-        e["packages"].add(fdg.get("package", ""))
-        e["classifies"].add(fdg.get("classify", ""))
-        e["targets"].add(target)
-        if fdg.get("version_local"):
-            e["cur"].add(fdg.get("version_local"))
-        if fdg.get("version_nixpkgs"):
-            e["patch"].add(fdg.get("version_nixpkgs"))
-        # entry (入口/設定)。"基盤依存 (N 入口)" は target ごとに N が揺れるので、
-        # 個別文字列を set に積まず最大入口数だけ保持して 1 つに集約する。
-        ent = fdg.get("entry") or fdg.get("bundled_by")  # bundled_by は旧 artifact 互換
-        if ent and ent != "—":
-            m = re.fullmatch(r"基盤依存 \((\d+) 入口\)", ent)
-            if m:
-                e["base_n"] = max(e["base_n"], int(m.group(1)))
-            else:
-                e["entry"].add(ent)
+        _accumulate(agg_notify, target, fdg)
+    for fdg in data.get("unknown", []):
+        _accumulate(agg_unknown, target, fdg)
+    for fdg in data.get("spotcheck", []):
+        _accumulate(agg_spot, target, fdg)
 
-items = sorted(agg.items(), key=lambda kv: -sevf(kv[1]["severity"]))
+
+def _sort_items(agg):
+    return sorted(agg.items(), key=lambda kv: -sevf(kv[1]["severity"]))
+
+
+items = _sort_items(agg_notify)
 fixable = [(v, e) for v, e in items if "fix_update_to_version_nixpkgs" in e["classifies"]]
 nofix = [(v, e) for v, e in items if "fix_update_to_version_nixpkgs" not in e["classifies"]]
+unknown_items = _sort_items(agg_unknown)
+spot_items = _sort_items(agg_spot)
 
 
 def joinset(s):
@@ -103,11 +121,15 @@ lines = [
     "",
     "> **凡例** — 🔧 **fixable**: nixpkgs に修正版あり、pin 解消/更新で直る（パッチ版明記）。"
     " 🛑 **no-fix**: 修正版が存在しない → Remove/Replace/Mitigate/受容(whitelist.csv)/upstream 待ち。"
+    " ❓ **UNKNOWN**: repology にデータ無し/版解析失敗で判定不能 (safe ではない、要確認)。"
+    " 🔍 **spot-check**: repology は非該当判定だが high-sev のため誤判定保険として併載 (DROP 維持)。"
     " auto-update で直る分(INFO)と誤検知(DROP)は除外済。詳細分類は各 run の job summary 参照。"
     " 入口(設定)=その版を closure に入れた宣言 (systemPackages/home.packages) とソースファイル"
     " (そこを更新/削除/service 無効化で解消)。『基盤依存』=多数参照の基盤ライブラリで config 単独不可、nixpkgs 更新待ち。",
     "",
-    f"**NOTIFY: {len(items)} CVE** (🔧 fixable {len(fixable)} / 🛑 no-fix {len(nofix)})",
+    f"**NOTIFY: {len(items)} CVE** (🔧 fixable {len(fixable)} / 🛑 no-fix {len(nofix)})"
+    f" ・ ❓ UNKNOWN {len(unknown_items)}"
+    + (f" ・ 🔍 spot-check {len(spot_items)}" if spot_items else ""),
     "",
 ]
 if fixable:
@@ -122,8 +144,23 @@ if nofix:
         url = f"https://nvd.nist.gov/vuln/detail/{vid}"
         lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {entrycol(e)} | {joinset(e['targets'])} |")
     lines.append("")
-if not items:
-    lines.append("✅ 現在 NOTIFY 対象の脆弱性はありません。")
+if unknown_items:
+    lines += ["### ❓ UNKNOWN — 判定不能 (要確認・safe ではない)", "", "| CVE | sev | pkg | 現在版 | 理由 | 入口 (設定) | 影響ターゲット |", "|---|---|---|---|---|---|---|"]
+    for vid, e in unknown_items:
+        url = f"https://nvd.nist.gov/vuln/detail/{vid}"
+        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['classifies'])} | {entrycol(e)} | {joinset(e['targets'])} |")
+    lines.append("")
+if spot_items:
+    lines += ["### 🔍 spot-check — repology 非該当・high-sev (念のため確認・自動 DROP)", "", "| CVE | sev | pkg | 現在版 | 入口 (設定) | 影響ターゲット |", "|---|---|---|---|---|---|"]
+    for vid, e in spot_items:
+        url = f"https://nvd.nist.gov/vuln/detail/{vid}"
+        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {entrycol(e)} | {joinset(e['targets'])} |")
+    lines.append("")
+# 要対処/要確認 = NOTIFY または UNKNOWN。spot-check は DROP 維持の「念のため」枠なので
+# 単独では Issue を open し続けない (= repology 非該当を信頼。常時 alarm 化を避ける)。
+has_content = bool(items or unknown_items)
+if not has_content:
+    lines.append("✅ 現在 NOTIFY / UNKNOWN 対象の脆弱性はありません。")
 else:
     lines.append("> 確定FP/リスク受容は whitelist.csv に追記すると以降抑制されます。")
 body = "\n".join(lines)
@@ -177,19 +214,20 @@ if st != 200 or not isinstance(issues, list):
     sys.exit(1)
 existing = next((it for it in issues if "pull_request" not in it), None)
 
-if items:
+cnt = f"NOTIFY {len(items)} / UNKNOWN {len(unknown_items)}"
+if has_content:
     if existing:
         st, _ = req("PATCH", f"/repos/{repo}/issues/{existing['number']}", {"body": body, "state": "open"})
         must(st, f"issue #{existing['number']} の更新")
-        print(f"updated issue #{existing['number']} ({len(items)} CVE)")
+        print(f"updated issue #{existing['number']} ({cnt})")
     else:
         st, _ = req("POST", f"/repos/{repo}/issues", {"title": TITLE, "body": body, "labels": [LABEL]})
         must(st, "issue の作成")
-        print(f"created issue ({len(items)} CVE)")
+        print(f"created issue ({cnt})")
 else:
     if existing:
         st, _ = req("PATCH", f"/repos/{repo}/issues/{existing['number']}", {"body": body, "state": "closed"})
         must(st, f"issue #{existing['number']} の close")
-        print(f"closed issue #{existing['number']} (NOTIFY 0)")
+        print(f"closed issue #{existing['number']} (NOTIFY 0 / UNKNOWN 0)")
     else:
-        print("no NOTIFY, no existing issue")
+        print("no NOTIFY/UNKNOWN, no existing issue")

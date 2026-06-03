@@ -8,9 +8,13 @@ usage: vulnxscan_summary.py <csv_path> <target> [closure_file] [notify_json_out]
     🔧 fixable : fix_update_to_version_nixpkgs かつ pin されている
                  (nixpkgs に修正版あり / auto-update で動かない) → パッチ版を明記
     🛑 no-fix  : fix_not_available (修正がどこにも無い → mitigation/受容/待ち)
+  ❓ UNKNOWN = err_missing_repology_version / err_invalid_version (判定不能)。
+              repology にデータ無し / 版解析失敗。safe ではないので surface する (#285a)。
   INFO  = auto-update 解決見込み
           fix_update_to_version_upstream + unpinned fix_update_to_version_nixpkgs
-  DROP  = noise (err_not_vulnerable_based_on_repology 等)
+  DROP  = noise (err_not_vulnerable_based_on_repology = repology が非該当判定)。
+          ただし high-sev (>= HIGH_SEV_SPOTCHECK) は repology 誤判定保険として
+          🔍 spot-check に併載する (DROP は維持, #285b)。
   whitelist=True は確定FP/リスク受容として抑制 (件数のみ)
 
 closure_file (任意): `nix path-info -r [--json] <target>` の出力。
@@ -39,11 +43,14 @@ roots_path = sys.argv[5] if len(sys.argv) > 5 else None
 ENTRY_FANOUT_LIMIT = 6  # これを超える入口数 = 基盤依存 (config では直せない)
 ENTRY_SHOW = 3  # 列挙する入口の最大数 (残りは先頭の入口数 "N 入口" で示す)
 
-NOISE_CLASSIFY = {
-    "err_not_vulnerable_based_on_repology",
+# 判定不能 (repology にデータ無し / 版解析失敗)。safe ではないので ❓UNKNOWN として
+# surface する (#285a)。err_not_vulnerable_based_on_repology は repology が明示的に
+# 「非該当」と返したものなので DROP のままだが、high-sev は spot-check で可視化 (#285b)。
+UNKNOWN_CLASSIFY = {
     "err_missing_repology_version",
     "err_invalid_version",
 }
+HIGH_SEV_SPOTCHECK = 9.0  # repology 非該当でもこの severity 以上は念のため確認リストへ
 
 
 def sevf(x):
@@ -294,13 +301,21 @@ total = len(rows)
 pkgs = len({r.get("package", "") for r in rows})
 
 fixable, nofix, info, drop, whitelisted = [], [], [], [], []
+unknown, spotcheck = [], []  # #285: 判定不能 / high-sev の repology 非該当
 for r in rows:
     if str(r.get("whitelist", "")).strip().lower() == "true":
         whitelisted.append(r)
         continue
     cl = r.get("classify", "")
-    if cl in NOISE_CLASSIFY:
+    if cl in UNKNOWN_CLASSIFY:
+        # repology が判定できなかった = unknown。safe と同一視せず surface する。
+        unknown.append(r)
+    elif cl == "err_not_vulnerable_based_on_repology":
+        # repology が「非該当」と判定 → DROP。ただし repology は非権威なので
+        # high-sev は spot-check に併載する (DROP は維持しつつ「念のため確認」)。
         drop.append(r)
+        if sevf(r.get("severity")) >= HIGH_SEV_SPOTCHECK:
+            spotcheck.append(r)
     elif cl == "fix_update_to_version_nixpkgs":
         # nixpkgs に修正版あり。pin されている = auto-update で直らない → fixable。
         # pin されていない = 次の auto-update で直る → info。
@@ -332,7 +347,9 @@ print(f"- **target**: `{target}`")
 print(f"- **検出**: {total} CVE / {pkgs} packages")
 print(
     f"- **NOTIFY {len(notify)}** (🔧 fixable {len(fixable)} / 🛑 no-fix {len(nofix)}) "
-    f"・ INFO {len(info)} ・ DROP {len(drop)} ・ whitelisted {len(whitelisted)}"
+    f"・ ❓ UNKNOWN {len(unknown)} ・ INFO {len(info)} ・ DROP {len(drop)}"
+    + (f" (🔍 spot-check {len(spotcheck)})" if spotcheck else "")
+    + f" ・ whitelisted {len(whitelisted)}"
     + ("" if closure_path else "  _(closure 未指定: pin 検出 OFF)_")
 )
 print()
@@ -340,7 +357,9 @@ print(
     "> **凡例** — NOTIFY = latest nixpkgs でも残る要対処 CVE。"
     "🔧 **fixable**: nixpkgs に修正版あり、pin 解消/更新で直る（パッチ版を明記）。"
     "🛑 **no-fix**: 修正版が存在しない → Remove/Replace/Mitigate/受容(whitelist)/待ち。"
-    " INFO=auto-update で自動解決見込み・DROP=誤検知。"
+    " ❓ **UNKNOWN**=repology にデータ無し/版解析失敗で判定不能 (safe ではない、要確認)。"
+    " INFO=auto-update で自動解決見込み・DROP=誤検知 "
+    "(repology 非該当のうち high-sev は 🔍 **spot-check** に併載=誤判定保険、DROP は維持)。"
     " 入口(設定)=その版を closure に入れた宣言 (systemPackages/home.packages) と"
     "ソースファイル。そこを更新/削除/service 無効化で解消できる。"
     "『基盤依存 (N 入口)』= 多数から参照される基盤ライブラリで config 単独では直せない"
@@ -392,6 +411,33 @@ table(
         origin(r.get("package", ""), r.get("version_local", "")),
     ],
     "🛑 NOTIFY / no-fix — 修正版なし (mitigation/受容/待ち)",
+)
+# ❓ UNKNOWN: 判定不能 (repology データ無し / 版解析失敗)。safe ではないので要確認 (#285a)。
+table(
+    unknown,
+    ["CVE", "sev", "pkg", "現在版", "理由", "入口 (設定)"],
+    lambda r: [
+        r.get("vuln_id", ""),
+        r.get("severity", ""),
+        r.get("package", ""),
+        r.get("version_local", ""),
+        r.get("classify", ""),
+        origin(r.get("package", ""), r.get("version_local", "")),
+    ],
+    "❓ UNKNOWN — 判定不能 (要確認・safe ではない)",
+)
+# 🔍 spot-check: repology 非該当だが high-sev。誤判定保険の確認リスト (DROP は維持, #285b)。
+table(
+    spotcheck,
+    ["CVE", "sev", "pkg", "現在版", "入口 (設定)"],
+    lambda r: [
+        r.get("vuln_id", ""),
+        r.get("severity", ""),
+        r.get("package", ""),
+        r.get("version_local", ""),
+        origin(r.get("package", ""), r.get("version_local", "")),
+    ],
+    f"🔍 spot-check — repology 非該当・sev≥{HIGH_SEV_SPOTCHECK:g} (念のため確認・自動 DROP)",
 )
 
 if info:

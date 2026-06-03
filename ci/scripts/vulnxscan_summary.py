@@ -56,9 +56,17 @@ GENERIC_NODES = {
 }
 
 
+def _base(store_path):
+    """store path -> hash prefix を除いた basename (<name>-<ver>[-<output>])。"""
+    return re.sub(r"^[a-z0-9]{32}-", "", store_path.rsplit("/", 1)[-1])
+
+
 def _node_name(store_path):
-    """/nix/store/<hash>-<name>-<ver>[-<output>] -> (name, version)。"""
-    b = re.sub(r"^[a-z0-9]{32}-", "", store_path.rsplit("/", 1)[-1])
+    """/nix/store/<hash>-<name>-<ver>[-<output>] -> (name, version)。
+    version の正規表現は `-` で止まる (出力サフィックス -lib 等と区別するため) ので、
+    `2.42-61` のような nixpkgs patch-set suffix 付き版は `2.42` に切り詰められる点に注意。
+    脆弱版との照合には _base() の prefix 一致を使う (bundled_by 参照)。"""
+    b = _base(store_path)
     m = re.match(r"^(.+?)-(\d[\w.+]*)", b)
     return (m.group(1), m.group(2)) if m else (b, "")
 
@@ -145,10 +153,17 @@ def bundled_by(pkg, ver, cap=3):
     直接導入 (generic な親しか居ない) は "—"。"""
     if not ref_parents:
         return ""
+    # 脆弱版の store path 特定。version は _node_name だと `2.42-61` 等が `2.42` に
+    # 切り詰められ完全一致に失敗するため、basename の prefix (<pkg>-<ver> 直後が
+    # `-`<output> か終端) で照合する。ver 未指定なら name 一致のみ。
+    prefix = f"{pkg}-{ver}" if ver else ""
     out = set()
     for p in store_paths:
-        n, v = _node_name(p)
-        if n != pkg or (ver and v != ver):
+        if ver:
+            b = _base(p)
+            if b != prefix and not b.startswith(prefix + "-"):
+                continue
+        elif _node_name(p)[0] != pkg:
             continue
         for parent in ref_parents.get(p, ()):
             pn = _meaningful_parent(parent, pkg)

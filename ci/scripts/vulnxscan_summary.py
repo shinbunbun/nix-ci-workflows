@@ -71,6 +71,22 @@ def _is_generic(name):
     return "home-manager" in name or name.endswith("-env")
 
 
+def _meaningful_parent(parent_path, pkg):
+    """parent_path が pkg の『由来』として意味ある親なら name、そうでなければ None。
+    glue/config/trigger ノード (X-Restart-Triggers-*, *.conf, 50-*.conf 等) は version を
+    持たないという構造的特徴で弾く (純粋な name denylist より漏れが桁違いに少ない)。"""
+    n, v = _node_name(parent_path)
+    if n == pkg:  # 自身の別 output (ffmpeg-bin が ffmpeg-lib を参照する等)
+        return None
+    if not v:  # 版なし = 実パッケージでない (glue/config/trigger)
+        return None
+    if n.endswith(("-wrapped", "-wrapper")):  # ラッパー derivation
+        return None
+    if _is_generic(n):  # 版は持つが汎用コンテナ (nixos-system-* 等)
+        return None
+    return n
+
+
 def _load_closure(path):
     """closure ファイルを読み込む。先頭が [ / { なら `--json` (参照グラフ) として
     パースし逆参照を構築、それ以外は plain text として版のみ抽出する。"""
@@ -135,10 +151,9 @@ def bundled_by(pkg, ver, cap=3):
         if n != pkg or (ver and v != ver):
             continue
         for parent in ref_parents.get(p, ()):
-            pn = _node_name(parent)[0]
-            if pn == pkg or _is_generic(pn):
-                continue
-            out.add(pn)
+            pn = _meaningful_parent(parent, pkg)
+            if pn:
+                out.add(pn)
     if not out:
         return "—"
     s = sorted(out)

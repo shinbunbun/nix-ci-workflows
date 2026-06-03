@@ -105,17 +105,19 @@ jobs:
           nix run github:tiiuae/sbomnix#vulnxscan ${OVERRIDE[@]+"${OVERRIDE[@]}"} -- \
             "$TARGET" ${ARGS[@]+"${ARGS[@]}"} --out "$RUNNER_TEMP/vulns.csv"
 
-      - name: Capture closure (pin 検出用)
+      - name: Capture closure graph (pin 検出 + 由来)
         if: always()
         env:
           TARGET: ${{ inputs.target }}
         run: |
           set -euo pipefail
           # vulnxscan が target を realise 済みなので path-info は速い。
-          # summary script が pin 検出 (同 package が複数版 = auto-update で直らない) に使う。
-          # store path の prefix 除去は summary script (python) 側で行う
-          # (darwin runner では sed/sort が PATH に無いことがあるため外部ツール非依存にする)。
-          nix path-info -r "$TARGET" > "$RUNNER_TEMP/closure.txt" 2>/dev/null || true
+          # --json で各 path の references を含む参照グラフを取得し、summary script が
+          #   pin 検出 (同 package が複数版 = auto-update で直らない)
+          #   由来 (bundled by = 脆弱版を closure に入れた親) の逆引き
+          # の両方に使う。JSON パースは python 側 (darwin runner では jq/sed が PATH に
+          # 無いことがあるため外部ツール非依存にする)。
+          nix path-info -r --json "$TARGET" > "$RUNNER_TEMP/closure.json" 2>/dev/null || true
 
       - name: Build job summary
         if: always()
@@ -129,7 +131,7 @@ jobs:
             # 第4引数 notify.json = NOTIFY を集約 (Issue 起票) 用に JSON 出力
             nix run nixpkgs#python3 -- \
               .nix-ci-workflows/ci/scripts/vulnxscan_summary.py \
-              "$CSV" "$TARGET" "$RUNNER_TEMP/closure.txt" "$RUNNER_TEMP/notify.json" \
+              "$CSV" "$TARGET" "$RUNNER_TEMP/closure.json" "$RUNNER_TEMP/notify.json" \
               >> "$GITHUB_STEP_SUMMARY"
           else
             echo "## vulnxscan: 出力 CSV なし（スキャン失敗の可能性）" >> "$GITHUB_STEP_SUMMARY"

@@ -13,13 +13,17 @@ usage: vulnxscan_summary.py <csv_path> <target> [closure_file] [notify_json_out]
   DROP  = noise (err_not_vulnerable_based_on_repology 等)
   whitelist=True は確定FP/リスク受容として抑制 (件数のみ)
 
-closure_file (任意): `nix path-info -r <target>` の出力。pin 検出に使う。
+closure_file (任意): `nix path-info -r [--json] <target>` の出力。
+  - `--json` (参照グラフ) なら pin 検出 + 由来 (bundled by / 依存元の親) を算出。
+  - plain text なら pin 検出のみ (由来は "—" 不可)。
 notify_json_out (任意): NOTIFY を JSON 出力 (集約/Issue 起票用)。
 """
 import csv
+import json
 import re
 import sys
 from collections import Counter, defaultdict
+from functools import lru_cache
 
 csv_path = sys.argv[1] if len(sys.argv) > 1 else "vulns.triage.csv"
 target = sys.argv[2] if len(sys.argv) > 2 else "(unknown)"
@@ -40,31 +44,120 @@ def sevf(x):
         return 0.0
 
 
-# closure -> package -> {versions} (pin 検出用)
+# closure 解析: package -> {versions} (pin 検出) と reverse-ref graph (由来 / bundled by)
 closure_versions = defaultdict(set)
-if closure_path:
+ref_parents = {}  # store path -> {それを参照する store path}
+store_paths = []  # closure 内の全 store path (--json 時のみ)
+
+# 由来抽出で「意味ある親」とみなさない汎用コンテナ (これ自体は何かを bundle していない)
+GENERIC_NODES = {
+    "system-path", "user-environment", "home-manager-path",
+    "home-manager-files", "etc", "set-environment", "profile", "sw",
+}
+
+
+def _node_name(store_path):
+    """/nix/store/<hash>-<name>-<ver>[-<output>] -> (name, version)。"""
+    b = re.sub(r"^[a-z0-9]{32}-", "", store_path.rsplit("/", 1)[-1])
+    m = re.match(r"^(.+?)-(\d[\w.+]*)", b)
+    return (m.group(1), m.group(2)) if m else (b, "")
+
+
+def _is_generic(name):
+    if name in GENERIC_NODES:
+        return True
+    if name.startswith(("nixos-system", "darwin-system", "unit-", "etc-")):
+        return True
+    return "home-manager" in name or name.endswith("-env")
+
+
+def _meaningful_parent(parent_path, pkg):
+    """parent_path が pkg の『由来』として意味ある親なら name、そうでなければ None。
+    glue/config/trigger ノード (X-Restart-Triggers-*, *.conf, 50-*.conf 等) は version を
+    持たないという構造的特徴で弾く (純粋な name denylist より漏れが桁違いに少ない)。"""
+    n, v = _node_name(parent_path)
+    if n == pkg:  # 自身の別 output (ffmpeg-bin が ffmpeg-lib を参照する等)
+        return None
+    if not v:  # 版なし = 実パッケージでない (glue/config/trigger)
+        return None
+    if n.endswith(("-wrapped", "-wrapper")):  # ラッパー derivation
+        return None
+    if _is_generic(n):  # 版は持つが汎用コンテナ (nixos-system-* 等)
+        return None
+    return n
+
+
+def _load_closure(path):
+    """closure ファイルを読み込む。先頭が [ / { なら `--json` (参照グラフ) として
+    パースし逆参照を構築、それ以外は plain text として版のみ抽出する。"""
     try:
-        with open(closure_path) as f:
-            for line in f:
-                name = line.strip()
-                if not name:
-                    continue
-                # raw な `nix path-info -r` 出力 (/nix/store/<hash>-name-ver) なら
-                # store path prefix を除去。strip 済み basename はそのまま。
-                if name.startswith("/"):
-                    name = re.sub(r"^[a-z0-9]{32}-", "", name.rsplit("/", 1)[-1])
-                m = re.match(r"^(.+?)-(\d[\w.+]*)", name)
-                if m:
-                    closure_versions[m.group(1)].add(m.group(2))
+        with open(path) as f:
+            text = f.read()
     except FileNotFoundError:
-        closure_path = None
-    if closure_path and not closure_versions:
-        closure_path = None
+        return False
+    if text.lstrip()[:1] in "[{":
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return False
+        # nix のバージョンで dict ({path: {...}}) か list ([{path, ...}]) が変わる
+        graph = (
+            [(p, (v or {}).get("references", [])) for p, v in data.items()]
+            if isinstance(data, dict)
+            else [(e.get("path", ""), e.get("references", [])) for e in data]
+        )
+        for p, refs in graph:
+            if not p:
+                continue
+            store_paths.append(p)
+            n, ver = _node_name(p)
+            if ver:
+                closure_versions[n].add(ver)
+            for r in refs:
+                ref_parents.setdefault(r, set()).add(p)
+        return bool(store_paths)
+    # plain text (`nix path-info -r`): 版のみ (由来は算出不可)
+    for line in text.splitlines():
+        name = line.strip()
+        if not name:
+            continue
+        if name.startswith("/"):
+            name = re.sub(r"^[a-z0-9]{32}-", "", name.rsplit("/", 1)[-1])
+        m = re.match(r"^(.+?)-(\d[\w.+]*)", name)
+        if m:
+            closure_versions[m.group(1)].add(m.group(2))
+    return bool(closure_versions)
+
+
+if closure_path and not _load_closure(closure_path):
+    closure_path = None
 
 
 def is_pinned(pkg):
     """package が closure に複数版で存在 = 意図的 pin (古い版の CVE は auto-update で直らない)。"""
     return len(closure_versions.get(pkg, set())) >= 2
+
+
+@lru_cache(maxsize=None)
+def bundled_by(pkg, ver, cap=3):
+    """pkg@ver を closure に入れた『意味ある親』(由来)。generic ノードと自身の
+    output (同名) を除外し、上位 cap 件 + 残数を返す。参照グラフが無ければ ""。
+    直接導入 (generic な親しか居ない) は "—"。"""
+    if not ref_parents:
+        return ""
+    out = set()
+    for p in store_paths:
+        n, v = _node_name(p)
+        if n != pkg or (ver and v != ver):
+            continue
+        for parent in ref_parents.get(p, ()):
+            pn = _meaningful_parent(parent, pkg)
+            if pn:
+                out.add(pn)
+    if not out:
+        return "—"
+    s = sorted(out)
+    return ",".join(s[:cap]) + (f" +{len(s) - cap}" if len(s) > cap else "")
 
 
 try:
@@ -100,12 +193,15 @@ for r in rows:
 
 notify = fixable + nofix
 
-# 集約 (Issue 起票) 用に NOTIFY を JSON 出力
+# 集約 (Issue 起票) 用に NOTIFY を JSON 出力 (由来 bundled_by も含める)
 if notify_json_path:
-    import json
-
     keys = ["vuln_id", "severity", "package", "classify", "version_local", "version_nixpkgs"]
-    payload = {"target": target, "findings": [{k: r.get(k, "") for k in keys} for r in notify]}
+    findings = []
+    for r in notify:
+        d = {k: r.get(k, "") for k in keys}
+        d["bundled_by"] = bundled_by(r.get("package", ""), r.get("version_local", ""))
+        findings.append(d)
+    payload = {"target": target, "findings": findings}
     with open(notify_json_path, "w") as jf:
         json.dump(payload, jf, ensure_ascii=False)
 
@@ -122,7 +218,8 @@ print(
     "> **凡例** — NOTIFY = latest nixpkgs でも残る要対処 CVE。"
     "🔧 **fixable**: nixpkgs に修正版あり、pin 解消/更新で直る（パッチ版を明記）。"
     "🛑 **no-fix**: 修正版が存在しない → Remove/Replace/Mitigate/受容(whitelist)/待ち。"
-    " INFO=auto-update で自動解決見込み・DROP=誤検知。\n"
+    " INFO=auto-update で自動解決見込み・DROP=誤検知。"
+    " 由来=その版を closure に入れた親 (— は直接導入、`+N` は他にも N 件)。\n"
 )
 
 if not rows:
@@ -144,24 +241,31 @@ def table(items, headers, row_fn, title):
     print()
 
 
-# 🔧 fixable: パッチ版 (version_nixpkgs) を明記
+# 🔧 fixable: パッチ版 (version_nixpkgs) を明記。由来 = 何にバンドルされたか。
 table(
     fixable,
-    ["CVE", "sev", "pkg", "現在版", "→ パッチ版 (nixpkgs)"],
+    ["CVE", "sev", "pkg", "現在版", "→ パッチ版 (nixpkgs)", "由来"],
     lambda r: [
         r.get("vuln_id", ""),
         r.get("severity", ""),
         r.get("package", ""),
         r.get("version_local", ""),
         r.get("version_nixpkgs", ""),
+        bundled_by(r.get("package", ""), r.get("version_local", "")),
     ],
     "🔧 NOTIFY / fixable — pin 解消・更新で直る",
 )
 # 🛑 no-fix
 table(
     nofix,
-    ["CVE", "sev", "pkg", "現在版"],
-    lambda r: [r.get("vuln_id", ""), r.get("severity", ""), r.get("package", ""), r.get("version_local", "")],
+    ["CVE", "sev", "pkg", "現在版", "由来"],
+    lambda r: [
+        r.get("vuln_id", ""),
+        r.get("severity", ""),
+        r.get("package", ""),
+        r.get("version_local", ""),
+        bundled_by(r.get("package", ""), r.get("version_local", "")),
+    ],
     "🛑 NOTIFY / no-fix — 修正版なし (mitigation/受容/待ち)",
 )
 

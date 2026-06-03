@@ -56,7 +56,7 @@ for path in sorted(glob.glob(os.path.join(signals_dir, "**", "notify.json"), rec
         e = agg.setdefault(
             vid,
             {"severity": "", "packages": set(), "classifies": set(), "targets": set(),
-             "cur": set(), "patch": set(), "entry": set()},
+             "cur": set(), "patch": set(), "entry": set(), "base_n": 0},
         )
         if sevf(fdg.get("severity")) > sevf(e["severity"]):
             e["severity"] = fdg.get("severity") or ""
@@ -67,10 +67,15 @@ for path in sorted(glob.glob(os.path.join(signals_dir, "**", "notify.json"), rec
             e["cur"].add(fdg.get("version_local"))
         if fdg.get("version_nixpkgs"):
             e["patch"].add(fdg.get("version_nixpkgs"))
-        # entry (入口/設定)。"基盤依存 (N 入口)" は target ごとに N が揺れるので正規化。
+        # entry (入口/設定)。"基盤依存 (N 入口)" は target ごとに N が揺れるので、
+        # 個別文字列を set に積まず最大入口数だけ保持して 1 つに集約する。
         ent = fdg.get("entry") or fdg.get("bundled_by")  # bundled_by は旧 artifact 互換
         if ent and ent != "—":
-            e["entry"].add(re.sub(r"基盤依存 \(\d+ 入口\)", "基盤依存", ent))
+            m = re.fullmatch(r"基盤依存 \((\d+) 入口\)", ent)
+            if m:
+                e["base_n"] = max(e["base_n"], int(m.group(1)))
+            else:
+                e["entry"].add(ent)
 
 items = sorted(agg.items(), key=lambda kv: -sevf(kv[1]["severity"]))
 fixable = [(v, e) for v, e in items if "fix_update_to_version_nixpkgs" in e["classifies"]]
@@ -79,6 +84,14 @@ nofix = [(v, e) for v, e in items if "fix_update_to_version_nixpkgs" not in e["c
 
 def joinset(s):
     return ",".join(sorted(x for x in s if x))
+
+
+def entrycol(e):
+    """入口 (設定) 列。列挙された入口 + (あれば) 集約した基盤依存 (max N 入口)。"""
+    parts = sorted(x for x in e["entry"] if x)
+    if e["base_n"]:
+        parts.append(f"基盤依存 ({e['base_n']} 入口)")
+    return ",".join(parts) or "—"
 
 
 # --- body 生成 ---
@@ -101,13 +114,13 @@ if fixable:
     lines += ["### 🔧 fixable — pin 解消・更新で直る", "", "| CVE | sev | pkg | 現在版 | → パッチ版 | 入口 (設定) | 影響ターゲット |", "|---|---|---|---|---|---|---|"]
     for vid, e in fixable:
         url = f"https://nvd.nist.gov/vuln/detail/{vid}"
-        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['patch'])} | {joinset(e['entry']) or '—'} | {joinset(e['targets'])} |")
+        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['patch'])} | {entrycol(e)} | {joinset(e['targets'])} |")
     lines.append("")
 if nofix:
     lines += ["### 🛑 no-fix — 修正版なし (mitigation/受容/待ち)", "", "| CVE | sev | pkg | 現在版 | 入口 (設定) | 影響ターゲット |", "|---|---|---|---|---|---|"]
     for vid, e in nofix:
         url = f"https://nvd.nist.gov/vuln/detail/{vid}"
-        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['entry']) or '—'} | {joinset(e['targets'])} |")
+        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {entrycol(e)} | {joinset(e['targets'])} |")
     lines.append("")
 if not items:
     lines.append("✅ 現在 NOTIFY 対象の脆弱性はありません。")

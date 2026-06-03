@@ -330,15 +330,26 @@ for r in rows:
 
 notify = fixable + nofix
 
-# 集約 (Issue 起票) 用に NOTIFY を JSON 出力 (入口 entry も含める)
+# 集約 (Issue 起票) 用に NOTIFY / UNKNOWN / spot-check を JSON 出力 (入口 entry も含める)。
+# 後方互換: 既存の "findings" (NOTIFY) キーは不変。unknown/spotcheck を追加キーとして
+# 並べる (古い aggregate は未知キーを無視するだけ) → 集約 Issue でも surface (#285a/b)。
 if notify_json_path:
     keys = ["vuln_id", "severity", "package", "classify", "version_local", "version_nixpkgs"]
-    findings = []
-    for r in notify:
-        d = {k: r.get(k, "") for k in keys}
-        d["entry"] = origin(r.get("package", ""), r.get("version_local", ""))
-        findings.append(d)
-    payload = {"target": target, "findings": findings}
+
+    def _to_findings(items):
+        out = []
+        for r in items:
+            d = {k: r.get(k, "") for k in keys}
+            d["entry"] = origin(r.get("package", ""), r.get("version_local", ""))
+            out.append(d)
+        return out
+
+    payload = {
+        "target": target,
+        "findings": _to_findings(notify),
+        "unknown": _to_findings(unknown),
+        "spotcheck": _to_findings(spotcheck),
+    }
     with open(notify_json_path, "w") as jf:
         json.dump(payload, jf, ensure_ascii=False)
 

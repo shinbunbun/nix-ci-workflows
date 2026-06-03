@@ -37,7 +37,7 @@ roots_path = sys.argv[5] if len(sys.argv) > 5 else None
 
 # 入口 (設定) 表示の調整: 入口が多い基盤ライブラリは個別列挙せず縮退する
 ENTRY_FANOUT_LIMIT = 6  # これを超える入口数 = 基盤依存 (config では直せない)
-ENTRY_SHOW = 3  # 列挙する入口の最大数 (残りは "他N")
+ENTRY_SHOW = 3  # 列挙する入口の最大数 (残りは先頭の入口数 "N 入口" で示す)
 
 NOISE_CLASSIFY = {
     "err_not_vulnerable_based_on_repology",
@@ -267,8 +267,10 @@ def origin(pkg, ver):
         return bundled_by(pkg, ver)  # フォールバック (closure immediate referrer)
     if not eps:
         return "—"
-    if len(eps) > ENTRY_FANOUT_LIMIT:
-        return f"基盤依存 ({len(eps)} 入口)"
+    # 入口数を常に明示する (1 = そこを直せば確実に消える / 多数 = 基盤依存で config 不可)。
+    n_ep = len(eps)
+    if n_ep > ENTRY_FANOUT_LIMIT:
+        return f"基盤依存 ({n_ep} 入口)"
 
     def render(n, f, s):
         # file があれば file、無ければ src ラベル (home:<user> 等) で補う
@@ -276,8 +278,8 @@ def origin(pkg, ver):
         return f"{n} ({loc})" if loc else n
 
     shown = [render(*ep) for ep in eps[:ENTRY_SHOW]]
-    extra = len(eps) - ENTRY_SHOW
-    return "; ".join(shown) + (f" 他{extra}" if extra > 0 else "")
+    # ENTRY_SHOW 件までを列挙。残りは入口数 (N 入口) で示すので "他N" は省く。
+    return f"{n_ep} 入口: " + "; ".join(shown)
 
 
 try:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """vulnxscan の (triage) CSV を分類して job summary を生成する。
 
-usage: vulnxscan_summary.py <csv_path> <target> [closure_file] [notify_json_out]
+usage: vulnxscan_summary.py <csv_path> <target> [closure_file] [notify_json_out] [roots_file]
 
 分類 (auto-update-flake.lock 前提, dotfiles-private#276):
   NOTIFY = latest nixpkgs でも残る = 要対処
@@ -14,21 +14,30 @@ usage: vulnxscan_summary.py <csv_path> <target> [closure_file] [notify_json_out]
   whitelist=True は確定FP/リスク受容として抑制 (件数のみ)
 
 closure_file (任意): `nix path-info -r [--json] <target>` の出力。
-  - `--json` (参照グラフ) なら pin 検出 + 由来 (bundled by / 依存元の親) を算出。
-  - plain text なら pin 検出のみ (由来は "—" 不可)。
+  - `--json` (参照グラフ) なら pin 検出 + 入口/由来の逆引きを算出。
+  - plain text なら pin 検出のみ。
 notify_json_out (任意): NOTIFY を JSON 出力 (集約/Issue 起票用)。
+roots_file (任意): vulnxscan_provenance.nix の出力 (宣言ルート [{o,n,f,src}])。
+  これがあると「入口 (設定)」= 脆弱版を closure に入れた宣言 (systemPackages /
+  home.packages) とそのソースファイルを逆引きする。無い場合は closure の
+  immediate referrer (由来 / bundled by) にフォールバックする。
 """
 import csv
 import json
 import re
 import sys
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from functools import lru_cache
 
 csv_path = sys.argv[1] if len(sys.argv) > 1 else "vulns.triage.csv"
 target = sys.argv[2] if len(sys.argv) > 2 else "(unknown)"
 closure_path = sys.argv[3] if len(sys.argv) > 3 else None
 notify_json_path = sys.argv[4] if len(sys.argv) > 4 else None
+roots_path = sys.argv[5] if len(sys.argv) > 5 else None
+
+# 入口 (設定) 表示の調整: 入口が多い基盤ライブラリは個別列挙せず縮退する
+ENTRY_FANOUT_LIMIT = 6  # これを超える入口数 = 基盤依存 (config では直せない)
+ENTRY_SHOW = 3  # 列挙する入口の最大数 (残りは "他N")
 
 NOISE_CLASSIFY = {
     "err_not_vulnerable_based_on_repology",
@@ -175,6 +184,102 @@ def bundled_by(pkg, ver, cap=3):
     return ",".join(s[:cap]) + (f" +{len(s) - cap}" if len(s) > cap else "")
 
 
+# --- 入口 (設定) 逆引き: 宣言ルート (provenance) を closure グラフで逆到達する ---
+# declared_roots: outPath -> (name, file, src)  (vulnxscan_provenance.nix の出力)
+declared_roots = {}
+
+
+def _load_roots(path):
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, list):
+        return False
+    for e in data:
+        o = e.get("o")
+        if o:
+            declared_roots.setdefault(o, (e.get("n", "?"), e.get("f", ""), e.get("src", "")))
+    return bool(declared_roots)
+
+
+if roots_path and not _load_roots(roots_path):
+    roots_path = None
+
+
+def _relfile(f):
+    """flake source の store path prefix (/nix/store/<hash>-<name>/) を除去して
+    repo 相対パスに縮約する (例 .../<hash>-source/home/x.nix -> home/x.nix)。
+    位置不明 (module system が _file を保持しない宣言) は "" に正規化する。"""
+    if not f or f == "<unknown-file>":
+        return ""
+    return re.sub(r"^/nix/store/[a-z0-9]{32}-[^/]*/", "", f)
+
+
+def _pkgname(n):
+    """derivation name から版以降を落として表示名にする (vlc-3.0.23-2 -> vlc)。"""
+    return re.sub(r"-\d[\w.+]*.*$", "", n) or n
+
+
+def _vuln_paths(pkg, ver):
+    """脆弱版の store path 群 (basename prefix 一致)。"""
+    prefix = f"{pkg}-{ver}" if ver else ""
+    res = []
+    for p in store_paths:
+        if ver:
+            b = _base(p)
+            if b == prefix or b.startswith(prefix + "-"):
+                res.append(p)
+        elif _node_name(p)[0] == pkg:
+            res.append(p)
+    return res
+
+
+@lru_cache(maxsize=None)
+def entry_points(pkg, ver):
+    """pkg@ver を closure に入れた『宣言された入口』を逆到達で求める。
+    返り値: (name, relfile, src) のタプルのソート済み list。
+    provenance / closure が無ければ None (呼び出し側で由来にフォールバック)。"""
+    if not declared_roots or not ref_parents:
+        return None
+    targets = _vuln_paths(pkg, ver)
+    seen = set(targets)
+    q = deque(targets)
+    found = {}
+    while q:
+        cur = q.popleft()
+        if cur in declared_roots:
+            n, f, s = declared_roots[cur]
+            found[(_pkgname(n), _relfile(f), s)] = 1
+        for parent in ref_parents.get(cur, ()):
+            if parent not in seen:
+                seen.add(parent)
+                q.append(parent)
+    return sorted(found.keys())
+
+
+def origin(pkg, ver):
+    """表示用の『入口 (設定)』文字列。provenance があれば入口+ファイル、
+    多すぎる (基盤依存) なら縮退、無ければ由来 (bundled by) にフォールバック。"""
+    eps = entry_points(pkg, ver)
+    if eps is None:
+        return bundled_by(pkg, ver)  # フォールバック (closure immediate referrer)
+    if not eps:
+        return "—"
+    if len(eps) > ENTRY_FANOUT_LIMIT:
+        return f"基盤依存 ({len(eps)} 入口)"
+
+    def render(n, f, s):
+        # file があれば file、無ければ src ラベル (home:<user> 等) で補う
+        loc = f or (s if s and s != "system" else "")
+        return f"{n} ({loc})" if loc else n
+
+    shown = [render(*ep) for ep in eps[:ENTRY_SHOW]]
+    extra = len(eps) - ENTRY_SHOW
+    return "; ".join(shown) + (f" 他{extra}" if extra > 0 else "")
+
+
 try:
     with open(csv_path) as f:
         rows = list(csv.DictReader(f))
@@ -208,13 +313,13 @@ for r in rows:
 
 notify = fixable + nofix
 
-# 集約 (Issue 起票) 用に NOTIFY を JSON 出力 (由来 bundled_by も含める)
+# 集約 (Issue 起票) 用に NOTIFY を JSON 出力 (入口 entry も含める)
 if notify_json_path:
     keys = ["vuln_id", "severity", "package", "classify", "version_local", "version_nixpkgs"]
     findings = []
     for r in notify:
         d = {k: r.get(k, "") for k in keys}
-        d["bundled_by"] = bundled_by(r.get("package", ""), r.get("version_local", ""))
+        d["entry"] = origin(r.get("package", ""), r.get("version_local", ""))
         findings.append(d)
     payload = {"target": target, "findings": findings}
     with open(notify_json_path, "w") as jf:
@@ -234,7 +339,10 @@ print(
     "🔧 **fixable**: nixpkgs に修正版あり、pin 解消/更新で直る（パッチ版を明記）。"
     "🛑 **no-fix**: 修正版が存在しない → Remove/Replace/Mitigate/受容(whitelist)/待ち。"
     " INFO=auto-update で自動解決見込み・DROP=誤検知。"
-    " 由来=その版を closure に入れた親 (— は直接導入、`+N` は他にも N 件)。\n"
+    " 入口(設定)=その版を closure に入れた宣言 (systemPackages/home.packages) と"
+    "ソースファイル。そこを更新/削除/service 無効化で解消できる。"
+    "『基盤依存 (N 入口)』= 多数から参照される基盤ライブラリで config 単独では直せない"
+    " → nixpkgs 更新待ち。\n"
 )
 
 if not rows:
@@ -256,30 +364,30 @@ def table(items, headers, row_fn, title):
     print()
 
 
-# 🔧 fixable: パッチ版 (version_nixpkgs) を明記。由来 = 何にバンドルされたか。
+# 🔧 fixable: パッチ版 (version_nixpkgs) を明記。入口 = どの設定が原因か。
 table(
     fixable,
-    ["CVE", "sev", "pkg", "現在版", "→ パッチ版 (nixpkgs)", "由来"],
+    ["CVE", "sev", "pkg", "現在版", "→ パッチ版 (nixpkgs)", "入口 (設定)"],
     lambda r: [
         r.get("vuln_id", ""),
         r.get("severity", ""),
         r.get("package", ""),
         r.get("version_local", ""),
         r.get("version_nixpkgs", ""),
-        bundled_by(r.get("package", ""), r.get("version_local", "")),
+        origin(r.get("package", ""), r.get("version_local", "")),
     ],
     "🔧 NOTIFY / fixable — pin 解消・更新で直る",
 )
 # 🛑 no-fix
 table(
     nofix,
-    ["CVE", "sev", "pkg", "現在版", "由来"],
+    ["CVE", "sev", "pkg", "現在版", "入口 (設定)"],
     lambda r: [
         r.get("vuln_id", ""),
         r.get("severity", ""),
         r.get("package", ""),
         r.get("version_local", ""),
-        bundled_by(r.get("package", ""), r.get("version_local", "")),
+        origin(r.get("package", ""), r.get("version_local", "")),
     ],
     "🛑 NOTIFY / no-fix — 修正版なし (mitigation/受容/待ち)",
 )

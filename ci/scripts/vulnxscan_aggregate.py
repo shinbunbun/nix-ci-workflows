@@ -56,7 +56,7 @@ for path in sorted(glob.glob(os.path.join(signals_dir, "**", "notify.json"), rec
         e = agg.setdefault(
             vid,
             {"severity": "", "packages": set(), "classifies": set(), "targets": set(),
-             "cur": set(), "patch": set(), "bundled": set()},
+             "cur": set(), "patch": set(), "entry": set()},
         )
         if sevf(fdg.get("severity")) > sevf(e["severity"]):
             e["severity"] = fdg.get("severity") or ""
@@ -67,9 +67,10 @@ for path in sorted(glob.glob(os.path.join(signals_dir, "**", "notify.json"), rec
             e["cur"].add(fdg.get("version_local"))
         if fdg.get("version_nixpkgs"):
             e["patch"].add(fdg.get("version_nixpkgs"))
-        b = fdg.get("bundled_by")
-        if b and b != "—":
-            e["bundled"].add(b)
+        # entry (入口/設定)。"基盤依存 (N 入口)" は target ごとに N が揺れるので正規化。
+        ent = fdg.get("entry") or fdg.get("bundled_by")  # bundled_by は旧 artifact 互換
+        if ent and ent != "—":
+            e["entry"].add(re.sub(r"基盤依存 \(\d+ 入口\)", "基盤依存", ent))
 
 items = sorted(agg.items(), key=lambda kv: -sevf(kv[1]["severity"]))
 fixable = [(v, e) for v, e in items if "fix_update_to_version_nixpkgs" in e["classifies"]]
@@ -90,22 +91,23 @@ lines = [
     "> **凡例** — 🔧 **fixable**: nixpkgs に修正版あり、pin 解消/更新で直る（パッチ版明記）。"
     " 🛑 **no-fix**: 修正版が存在しない → Remove/Replace/Mitigate/受容(whitelist.csv)/upstream 待ち。"
     " auto-update で直る分(INFO)と誤検知(DROP)は除外済。詳細分類は各 run の job summary 参照。"
-    " 由来=その版を closure に入れた親 (— は直接導入、`+N` は他にも N 件)。",
+    " 入口(設定)=その版を closure に入れた宣言 (systemPackages/home.packages) とソースファイル"
+    " (そこを更新/削除/service 無効化で解消)。『基盤依存』=多数参照の基盤ライブラリで config 単独不可、nixpkgs 更新待ち。",
     "",
     f"**NOTIFY: {len(items)} CVE** (🔧 fixable {len(fixable)} / 🛑 no-fix {len(nofix)})",
     "",
 ]
 if fixable:
-    lines += ["### 🔧 fixable — pin 解消・更新で直る", "", "| CVE | sev | pkg | 現在版 | → パッチ版 | 由来 | 影響ターゲット |", "|---|---|---|---|---|---|---|"]
+    lines += ["### 🔧 fixable — pin 解消・更新で直る", "", "| CVE | sev | pkg | 現在版 | → パッチ版 | 入口 (設定) | 影響ターゲット |", "|---|---|---|---|---|---|---|"]
     for vid, e in fixable:
         url = f"https://nvd.nist.gov/vuln/detail/{vid}"
-        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['patch'])} | {joinset(e['bundled']) or '—'} | {joinset(e['targets'])} |")
+        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['patch'])} | {joinset(e['entry']) or '—'} | {joinset(e['targets'])} |")
     lines.append("")
 if nofix:
-    lines += ["### 🛑 no-fix — 修正版なし (mitigation/受容/待ち)", "", "| CVE | sev | pkg | 現在版 | 由来 | 影響ターゲット |", "|---|---|---|---|---|---|"]
+    lines += ["### 🛑 no-fix — 修正版なし (mitigation/受容/待ち)", "", "| CVE | sev | pkg | 現在版 | 入口 (設定) | 影響ターゲット |", "|---|---|---|---|---|---|"]
     for vid, e in nofix:
         url = f"https://nvd.nist.gov/vuln/detail/{vid}"
-        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['bundled']) or '—'} | {joinset(e['targets'])} |")
+        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['entry']) or '—'} | {joinset(e['targets'])} |")
     lines.append("")
 if not items:
     lines.append("✅ 現在 NOTIFY 対象の脆弱性はありません。")

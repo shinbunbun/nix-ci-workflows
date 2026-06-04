@@ -43,7 +43,7 @@ def short_target(t):
 # --- notify.json 収集 + vuln_id で dedup ---
 def _new_entry():
     return {"severity": "", "packages": set(), "classifies": set(), "targets": set(),
-            "cur": set(), "patch": set(), "entry": set(), "base_n": 0}
+            "cur": set(), "patch": set(), "entry": set(), "base_n": 0, "tracker": ""}
 
 
 def _accumulate(agg, target, fdg):
@@ -57,6 +57,9 @@ def _accumulate(agg, target, fdg):
     e["packages"].add(fdg.get("package", ""))
     e["classifies"].add(fdg.get("classify", ""))
     e["targets"].add(target)
+    # nixpkgs (Tracker) ステータスは CVE 単位なので target 間で同一。非空を 1 つ保持。
+    if fdg.get("tracker"):
+        e["tracker"] = fdg["tracker"]
     if fdg.get("version_local"):
         e["cur"].add(fdg.get("version_local"))
     if fdg.get("version_nixpkgs"):
@@ -72,8 +75,8 @@ def _accumulate(agg, target, fdg):
             e["entry"].add(ent)
 
 
-# NOTIFY / UNKNOWN / spot-check を別集合で集約 (notify.json の各キー、無ければ空)。
-agg_notify, agg_unknown, agg_spot = {}, {}, {}
+# NOTIFY / UNKNOWN / spot-check / reclassified を別集合で集約 (notify.json の各キー、無ければ空)。
+agg_notify, agg_unknown, agg_spot, agg_reclass = {}, {}, {}, {}
 for path in sorted(glob.glob(os.path.join(signals_dir, "**", "notify.json"), recursive=True)):
     try:
         with open(path) as f:
@@ -87,6 +90,8 @@ for path in sorted(glob.glob(os.path.join(signals_dir, "**", "notify.json"), rec
         _accumulate(agg_unknown, target, fdg)
     for fdg in data.get("spotcheck", []):
         _accumulate(agg_spot, target, fdg)
+    for fdg in data.get("reclassified", []):
+        _accumulate(agg_reclass, target, fdg)
 
 
 def _sort_items(agg):
@@ -98,6 +103,8 @@ fixable = [(v, e) for v, e in items if "fix_update_to_version_nixpkgs" in e["cla
 nofix = [(v, e) for v, e in items if "fix_update_to_version_nixpkgs" not in e["classifies"]]
 unknown_items = _sort_items(agg_unknown)
 spot_items = _sort_items(agg_spot)
+reclass_items = _sort_items(agg_reclass)
+tracker_on = bool(reclass_items) or any(e["tracker"] for _, e in items + unknown_items)
 
 
 def joinset(s):
@@ -112,6 +119,20 @@ def entrycol(e):
     return ",".join(parts) or "—"
 
 
+def trkcol(e):
+    """nixpkgs (Tracker) 権威ステータス列。未登録は — 。"""
+    return e["tracker"] or "—"
+
+
+def _trk_h():
+    """tracker 有効時のみ nixpkgs 列ヘッダ片を返す (無効時は空)。"""
+    return "nixpkgs | " if tracker_on else ""
+
+
+def _trk_c(e):
+    return f"{trkcol(e)} | " if tracker_on else ""
+
+
 # --- body 生成 ---
 ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M %Z")
 lines = [
@@ -122,6 +143,9 @@ lines = [
     "> **凡例** — 🔧 **fixable**: nixpkgs に修正版あり、pin 解消/更新で直る（パッチ版明記）。"
     " 🛑 **no-fix**: 修正版が存在しない → Remove/Replace/Mitigate/受容(whitelist.csv)/upstream 待ち。"
     " ❓ **UNKNOWN**: repology にデータ無し/版解析失敗で判定不能 (safe ではない、要確認)。"
+    " 🔁 **reclassified**: Nixpkgs Security Tracker が notaffected/notforus と判断 "
+    "(backport patch/対象外) し no-fix/UNKNOWN から降格した要確認・whitelist 候補。"
+    " **nixpkgs** 列=Tracker の権威ステータス (affected/wontfix/notaffected/notforus、— は未登録)。"
     " 🔍 **spot-check**: repology は非該当判定だが high-sev のため誤判定保険として併載 (DROP 維持)。"
     " auto-update で直る分(INFO)と誤検知(DROP)は除外済。詳細分類は各 run の job summary 参照。"
     " 入口(設定)=その版を closure に入れた宣言 (systemPackages/home.packages) とソースファイル"
@@ -129,6 +153,7 @@ lines = [
     "",
     f"**NOTIFY: {len(items)} CVE** (🔧 fixable {len(fixable)} / 🛑 no-fix {len(nofix)})"
     f" ・ ❓ UNKNOWN {len(unknown_items)}"
+    + (f" ・ 🔁 reclassified {len(reclass_items)}" if reclass_items else "")
     + (f" ・ 🔍 spot-check {len(spot_items)}" if spot_items else ""),
     "",
 ]
@@ -139,16 +164,22 @@ if fixable:
         lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['patch'])} | {entrycol(e)} | {joinset(e['targets'])} |")
     lines.append("")
 if nofix:
-    lines += ["### 🛑 no-fix — 修正版なし (mitigation/受容/待ち)", "", "| CVE | sev | pkg | 現在版 | 入口 (設定) | 影響ターゲット |", "|---|---|---|---|---|---|"]
+    lines += ["### 🛑 no-fix — 修正版なし (mitigation/受容/待ち)", "", f"| CVE | sev | pkg | 現在版 | {_trk_h()}入口 (設定) | 影響ターゲット |", "|---|---|---|---|" + ("---|" if tracker_on else "") + "---|---|"]
     for vid, e in nofix:
         url = f"https://nvd.nist.gov/vuln/detail/{vid}"
-        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {entrycol(e)} | {joinset(e['targets'])} |")
+        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {_trk_c(e)}{entrycol(e)} | {joinset(e['targets'])} |")
     lines.append("")
 if unknown_items:
-    lines += ["### ❓ UNKNOWN — 判定不能 (要確認・safe ではない)", "", "| CVE | sev | pkg | 現在版 | 理由 | 入口 (設定) | 影響ターゲット |", "|---|---|---|---|---|---|---|"]
+    lines += ["### ❓ UNKNOWN — 判定不能 (要確認・safe ではない)", "", f"| CVE | sev | pkg | 現在版 | 理由 | {_trk_h()}入口 (設定) | 影響ターゲット |", "|---|---|---|---|---|" + ("---|" if tracker_on else "") + "---|---|"]
     for vid, e in unknown_items:
         url = f"https://nvd.nist.gov/vuln/detail/{vid}"
-        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['classifies'])} | {entrycol(e)} | {joinset(e['targets'])} |")
+        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['classifies'])} | {_trk_c(e)}{entrycol(e)} | {joinset(e['targets'])} |")
+    lines.append("")
+if reclass_items:
+    lines += ["### 🔁 reclassified — Nixpkgs Tracker が非該当判断 (要確認・whitelist 候補)", "", "| CVE | sev | pkg | 現在版 | 元分類 | nixpkgs | 入口 (設定) | 影響ターゲット |", "|---|---|---|---|---|---|---|---|"]
+    for vid, e in reclass_items:
+        url = f"https://nvd.nist.gov/vuln/detail/{vid}"
+        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['classifies'])} | {trkcol(e)} | {entrycol(e)} | {joinset(e['targets'])} |")
     lines.append("")
 if spot_items:
     lines += ["### 🔍 spot-check — repology 非該当・high-sev (念のため確認・自動 DROP)", "", "| CVE | sev | pkg | 現在版 | 入口 (設定) | 影響ターゲット |", "|---|---|---|---|---|---|"]
@@ -156,11 +187,12 @@ if spot_items:
         url = f"https://nvd.nist.gov/vuln/detail/{vid}"
         lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {entrycol(e)} | {joinset(e['targets'])} |")
     lines.append("")
-# 要対処/要確認 = NOTIFY または UNKNOWN。spot-check は DROP 維持の「念のため」枠なので
-# 単独では Issue を open し続けない (= repology 非該当を信頼。常時 alarm 化を避ける)。
-has_content = bool(items or unknown_items)
+# 要対処/要確認 = NOTIFY / UNKNOWN / reclassified。reclassified は「確認して whitelist する」
+# 人手 action が残るので open 維持。spot-check は DROP 維持の「念のため」枠なので単独では
+# Issue を open し続けない (= repology 非該当を信頼。常時 alarm 化を避ける)。
+has_content = bool(items or unknown_items or reclass_items)
 if not has_content:
-    lines.append("✅ 現在 NOTIFY / UNKNOWN 対象の脆弱性はありません。")
+    lines.append("✅ 現在 NOTIFY / UNKNOWN / reclassified 対象の脆弱性はありません。")
 else:
     lines.append("> 確定FP/リスク受容は whitelist.csv に追記すると以降抑制されます。")
 body = "\n".join(lines)
@@ -214,7 +246,7 @@ if st != 200 or not isinstance(issues, list):
     sys.exit(1)
 existing = next((it for it in issues if "pull_request" not in it), None)
 
-cnt = f"NOTIFY {len(items)} / UNKNOWN {len(unknown_items)}"
+cnt = f"NOTIFY {len(items)} / UNKNOWN {len(unknown_items)} / reclassified {len(reclass_items)}"
 if has_content:
     if existing:
         st, _ = req("PATCH", f"/repos/{repo}/issues/{existing['number']}", {"body": body, "state": "open"})
@@ -228,6 +260,6 @@ else:
     if existing:
         st, _ = req("PATCH", f"/repos/{repo}/issues/{existing['number']}", {"body": body, "state": "closed"})
         must(st, f"issue #{existing['number']} の close")
-        print(f"closed issue #{existing['number']} (NOTIFY 0 / UNKNOWN 0)")
+        print(f"closed issue #{existing['number']} (NOTIFY 0 / UNKNOWN 0 / reclassified 0)")
     else:
-        print("no NOTIFY/UNKNOWN, no existing issue")
+        print("no NOTIFY/UNKNOWN/reclassified, no existing issue")

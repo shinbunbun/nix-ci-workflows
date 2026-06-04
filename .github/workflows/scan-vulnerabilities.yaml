@@ -158,7 +158,8 @@ jobs:
           fi
 
       - name: Re-verify via Nixpkgs Security Tracker (権威ソース)
-        if: always() && inputs.tracker
+        # triage 無効時は classify が無く降格対象 bucket も無いので tracker 照会をスキップ
+        if: always() && inputs.tracker && inputs.triage
         env:
           TRACKER_URL: ${{ inputs.tracker-url }}
         run: |

@@ -65,9 +65,12 @@ def _parse_items(data):
     return (data if isinstance(data, list) else []), None
 
 
-def fetch(cves, base_url=DEFAULT_BASE, opener=urllib.request.urlopen):
+def fetch(cves, base_url=DEFAULT_BASE, opener=None):
     """CVE 群の {cve: merged_status}。失敗は例外送出 (呼び出し側で握る)。
-    opener は test 用に差し替え可能 (urlopen 互換: (request, timeout=...) を取る)。"""
+    opener は test 用に差し替え可能 (urlopen 互換: (request, timeout=...) を取る)。
+    None なら urllib.request.urlopen を関数内で解決 (default 引数の早期束縛を避ける)。"""
+    if opener is None:
+        opener = urllib.request.urlopen
     acc = {}  # cve -> [statuses]
     for i in range(0, len(cves), CHUNK):
         chunk = cves[i:i + CHUNK]

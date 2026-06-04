@@ -35,10 +35,11 @@ tracker_file (任意): vulnxscan_tracker.py の出力 ({cve: status})。Nixpkgs 
   Tracker の権威ステータスで repology 単独分類を再検証する (#285c/#289)。
   notaffected/notforus の no-fix/UNKNOWN を 🔁 reclassified に降格 (silent DROP せず
   可視化)、他は据え置き + nixpkgs 列に status 注記。無い/空なら override 無しで現状維持。
-identity_file (任意): vulnxscan_identity.py の出力 ({vuln_id: {package, nix_repo, cve_repo}})。
-  UNKNOWN / spot-check のうち名前衝突 FP と確定したものを 🚫 identity-mismatch に隔離し
-  durable surface (集約 Issue) から除外する。FN を増やさないため衝突は積極証拠がある時のみ
-  確定される (vulnxscan_identity.py 参照)。無い/空なら override 無しで現状維持。
+identity_file (任意): vulnxscan_identity.py の出力 ({vuln_id: {verdict, package, ...}})。
+  verdict=collision (名前衝突 FP) は 🚫 identity-mismatch に隔離し durable surface から除外、
+  verdict=affected (NVD 版範囲で該当確定) は ✅ judged-affected として UNKNOWN/spot-check から
+  NOTIFY へ昇格する (#285)。昇格のみで降格はせず、衝突は積極証拠がある時のみ確定するため FN を
+  増やさない (vulnxscan_identity.py 参照)。無い/空なら override 無しで現状維持。
 """
 import csv
 import json
@@ -392,17 +393,23 @@ if identity_path:
     except (OSError, json.JSONDecodeError):
         identity_map = {}
 identity_loaded = bool(identity_map)
-collision = []
+collision = []  # verdict=collision: 名前衝突 FP (除外)
+judged = []     # verdict=affected: NVD 版範囲で該当確定 (UNKNOWN/spot-check → NOTIFY 昇格)
 
 
 def _identity_filter(bucket):
-    """bucket から衝突確定の row を抜き出し collision へ移す。残りを返す。"""
+    """bucket から verdict 付き row を抜き出す。collision は除外、affected は昇格 (judged)。
+    残り (判定なし) はそのまま返す。"""
     keep = []
     for r in bucket:
         info = identity_map.get(r.get("vuln_id", ""))
-        if info:
+        verdict = (info or {}).get("verdict")
+        if verdict == "collision":
             r["_identity"] = info
             collision.append(r)
+        elif verdict == "affected":
+            r["_identity"] = info
+            judged.append(r)
         else:
             keep.append(r)
     return keep
@@ -436,6 +443,9 @@ if notify_json_path:
         "unknown": _to_findings(unknown),
         "spotcheck": _to_findings(spotcheck),
         "reclassified": _to_findings(reclassified),
+        # judged = NVD 版範囲で該当確定し UNKNOWN/spot-check から昇格 (#285)。NOTIFY 級として
+        # 集約 Issue に surface する (aggregate が judged キーを描画)。
+        "judged": _to_findings(judged),
         # collision は監査用。集約 (aggregate) は未知キーを無視するので Issue には出ない
         # = durable surface から除外される (= FP 除去の目的)。
         "collision": _to_findings(collision),
@@ -448,7 +458,8 @@ print(f"- **target**: `{target}`")
 print(f"- **検出**: {total} CVE / {pkgs} packages")
 print(
     f"- **NOTIFY {len(notify)}** (🔧 fixable {len(fixable)} / 🛑 no-fix {len(nofix)}) "
-    f"・ ❓ UNKNOWN {len(unknown)}"
+    + (f"・ ✅ judged-affected {len(judged)} " if judged else "")
+    + f"・ ❓ UNKNOWN {len(unknown)}"
     + (f" ・ 🔁 reclassified {len(reclassified)}" if reclassified else "")
     + f" ・ INFO {len(info)} ・ DROP {len(drop)}"
     + (f" (🔍 spot-check {len(spotcheck)})" if spotcheck else "")
@@ -463,6 +474,8 @@ print(
     "> **凡例** — NOTIFY = latest nixpkgs でも残る要対処 CVE。"
     "🔧 **fixable**: nixpkgs に修正版あり、pin 解消/更新で直る（パッチ版を明記）。"
     "🛑 **no-fix**: 修正版が存在しない → Remove/Replace/Mitigate/受容(whitelist)/待ち。"
+    " ✅ **judged-affected**=repology が判定できなかったが NVD CPE の版範囲で該当確定 "
+    "(UNKNOWN/spot-check から NOTIFY へ昇格、vendor 一致 + clean 版のみの保守判定)。"
     " ❓ **UNKNOWN**=repology にデータ無し/版解析失敗で判定不能 (safe ではない、要確認)。"
     " 🔁 **reclassified**=Nixpkgs Security Tracker が notaffected/notforus と判断 "
     "(backport patch/対象外)。no-fix/UNKNOWN から降格した要確認・whitelist 候補。"
@@ -510,6 +523,22 @@ table(
     ],
     "🔧 NOTIFY / fixable — pin 解消・更新で直る",
 )
+# ✅ judged-affected: NVD 版範囲で該当確定し UNKNOWN/spot-check から昇格 (#285)。
+table(
+    judged,
+    ["CVE", "sev", "pkg", "現在版", "判定 (NVD CPE)", "入口 (設定)"],
+    lambda r: [
+        r.get("vuln_id", ""),
+        r.get("severity", ""),
+        r.get("package", ""),
+        r.get("version_local", ""),
+        f"{(r.get('_identity') or {}).get('cpe', '')} {(r.get('_identity') or {}).get('range', '')}".strip(),
+        origin(r.get("package", ""), r.get("version_local", "")),
+    ],
+    "✅ NOTIFY / judged-affected — NVD 版範囲で該当確定 (UNKNOWN/spot-check から昇格)",
+)
+
+
 def _trk(r):
     """nixpkgs (Tracker) 権威ステータス列。未登録は — 。"""
     return r.get("_tracker", "") or "—"

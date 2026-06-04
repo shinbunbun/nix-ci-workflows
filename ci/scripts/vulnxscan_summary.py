@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """vulnxscan の (triage) CSV を分類して job summary を生成する。
 
-usage: vulnxscan_summary.py <csv_path> <target> [closure_file] [notify_json_out] [roots_file]
+usage: vulnxscan_summary.py <csv_path> <target> [closure_file] [notify_json_out] [roots_file] [tracker_file]
 
 分類 (auto-update-flake.lock 前提, dotfiles-private#276):
   NOTIFY = latest nixpkgs でも残る = 要対処
@@ -15,6 +15,9 @@ usage: vulnxscan_summary.py <csv_path> <target> [closure_file] [notify_json_out]
   DROP  = noise (err_not_vulnerable_based_on_repology = repology が非該当判定)。
           ただし high-sev (>= HIGH_SEV_SPOTCHECK) は repology 誤判定保険として
           🔍 spot-check に併載する (DROP は維持, #285b)。
+  🔁 reclassified = tracker_file ありの時、no-fix/UNKNOWN のうち Nixpkgs Security
+          Tracker が notaffected/notforus と判断したもの (backport patch / 対象外)。
+          silent DROP せず「要確認・whitelist 候補」として可視化する (#285c/#289)。
   whitelist=True は確定FP/リスク受容として抑制 (件数のみ)
 
 closure_file (任意): `nix path-info -r [--json] <target>` の出力。
@@ -25,6 +28,10 @@ roots_file (任意): vulnxscan_provenance.nix の出力 (宣言ルート [{o,n,f
   これがあると「入口 (設定)」= 脆弱版を closure に入れた宣言 (systemPackages /
   home.packages) とそのソースファイルを逆引きする。無い場合は closure の
   immediate referrer (由来 / bundled by) にフォールバックする。
+tracker_file (任意): vulnxscan_tracker.py の出力 ({cve: status})。Nixpkgs Security
+  Tracker の権威ステータスで repology 単独分類を再検証する (#285c/#289)。
+  notaffected/notforus の no-fix/UNKNOWN を 🔁 reclassified に降格 (silent DROP せず
+  可視化)、他は据え置き + nixpkgs 列に status 注記。無い/空なら override 無しで現状維持。
 """
 import csv
 import json
@@ -38,6 +45,7 @@ target = sys.argv[2] if len(sys.argv) > 2 else "(unknown)"
 closure_path = sys.argv[3] if len(sys.argv) > 3 else None
 notify_json_path = sys.argv[4] if len(sys.argv) > 4 else None
 roots_path = sys.argv[5] if len(sys.argv) > 5 else None
+tracker_path = sys.argv[6] if len(sys.argv) > 6 else None
 
 # 入口 (設定) 表示の調整: 入口が多い基盤ライブラリは個別列挙せず縮退する
 ENTRY_FANOUT_LIMIT = 6  # これを超える入口数 = 基盤依存 (config では直せない)
@@ -328,9 +336,44 @@ for r in rows:
     else:
         info.append(r)
 
+# --- Nixpkgs Security Tracker による権威再検証 (#285c/#289) ---
+# tracker.json: {cve: status}。repology 単独で出した no-fix / UNKNOWN を nixpkgs の
+# 権威ステータスで見直す。notaffected/notforus (backport patch / 対象外) は silent DROP
+# せず 🔁 reclassified に降格して「要確認・whitelist 候補」として可視化 (保守的)。
+# affected/wontfix/unknown は据え置き、各 finding に _tracker を付けて nixpkgs 列に注記。
+tracker_status = {}
+if tracker_path:
+    try:
+        with open(tracker_path) as tf:
+            tracker_status = json.load(tf) or {}
+    except (OSError, json.JSONDecodeError):
+        tracker_status = {}
+tracker_loaded = bool(tracker_status)
+RECLASS_STATUS = {"notaffected", "notforus"}
+reclassified = []
+
+
+def _tracker_reverify(bucket):
+    """bucket を tracker で再検証。notaffected/notforus は reclassified へ移し、
+    残りは _tracker 注記を付けて keep。tracker データが無ければ素通し。"""
+    keep = []
+    for r in bucket:
+        st = tracker_status.get(r.get("vuln_id", ""), "")
+        r["_tracker"] = st
+        if st in RECLASS_STATUS:
+            reclassified.append(r)
+        else:
+            keep.append(r)
+    return keep
+
+
+if tracker_loaded:
+    nofix = _tracker_reverify(nofix)
+    unknown = _tracker_reverify(unknown)
+
 notify = fixable + nofix
 
-# 集約 (Issue 起票) 用に NOTIFY / UNKNOWN / spot-check を JSON 出力 (入口 entry も含める)。
+# 集約 (Issue 起票) 用に NOTIFY / UNKNOWN / spot-check / reclassified を JSON 出力。
 # 後方互換: 既存の "findings" (NOTIFY) キーは不変。unknown/spotcheck を追加キーとして
 # 並べる (古い aggregate は未知キーを無視するだけ) → 集約 Issue でも surface (#285a/b)。
 if notify_json_path:
@@ -341,6 +384,7 @@ if notify_json_path:
         for r in items:
             d = {k: r.get(k, "") for k in keys}
             d["entry"] = origin(r.get("package", ""), r.get("version_local", ""))
+            d["tracker"] = r.get("_tracker", "")  # nixpkgs 権威ステータス注記
             out.append(d)
         return out
 
@@ -349,6 +393,7 @@ if notify_json_path:
         "findings": _to_findings(notify),
         "unknown": _to_findings(unknown),
         "spotcheck": _to_findings(spotcheck),
+        "reclassified": _to_findings(reclassified),
     }
     with open(notify_json_path, "w") as jf:
         json.dump(payload, jf, ensure_ascii=False)
@@ -358,10 +403,13 @@ print(f"- **target**: `{target}`")
 print(f"- **検出**: {total} CVE / {pkgs} packages")
 print(
     f"- **NOTIFY {len(notify)}** (🔧 fixable {len(fixable)} / 🛑 no-fix {len(nofix)}) "
-    f"・ ❓ UNKNOWN {len(unknown)} ・ INFO {len(info)} ・ DROP {len(drop)}"
+    f"・ ❓ UNKNOWN {len(unknown)}"
+    + (f" ・ 🔁 reclassified {len(reclassified)}" if reclassified else "")
+    + f" ・ INFO {len(info)} ・ DROP {len(drop)}"
     + (f" (🔍 spot-check {len(spotcheck)})" if spotcheck else "")
     + f" ・ whitelisted {len(whitelisted)}"
     + ("" if closure_path else "  _(closure 未指定: pin 検出 OFF)_")
+    + ("" if tracker_loaded else "  _(tracker 未指定: 権威再検証 OFF)_")
 )
 print()
 print(
@@ -369,6 +417,9 @@ print(
     "🔧 **fixable**: nixpkgs に修正版あり、pin 解消/更新で直る（パッチ版を明記）。"
     "🛑 **no-fix**: 修正版が存在しない → Remove/Replace/Mitigate/受容(whitelist)/待ち。"
     " ❓ **UNKNOWN**=repology にデータ無し/版解析失敗で判定不能 (safe ではない、要確認)。"
+    " 🔁 **reclassified**=Nixpkgs Security Tracker が notaffected/notforus と判断 "
+    "(backport patch/対象外)。no-fix/UNKNOWN から降格した要確認・whitelist 候補。"
+    " **nixpkgs** 列=Tracker の権威ステータス (affected/wontfix/notaffected/notforus、— は未登録)。"
     " INFO=auto-update で自動解決見込み・DROP=誤検知 "
     "(repology 非該当のうち high-sev は 🔍 **spot-check** に併載=誤判定保険、DROP は維持)。"
     " 入口(設定)=その版を closure に入れた宣言 (systemPackages/home.packages) と"
@@ -410,32 +461,43 @@ table(
     ],
     "🔧 NOTIFY / fixable — pin 解消・更新で直る",
 )
-# 🛑 no-fix
+def _trk(r):
+    """nixpkgs (Tracker) 権威ステータス列。未登録は — 。"""
+    return r.get("_tracker", "") or "—"
+
+
+# 🛑 no-fix。tracker 有効時は nixpkgs 列で権威ステータスを併記 (#289)。
 table(
     nofix,
-    ["CVE", "sev", "pkg", "現在版", "入口 (設定)"],
-    lambda r: [
-        r.get("vuln_id", ""),
-        r.get("severity", ""),
-        r.get("package", ""),
-        r.get("version_local", ""),
-        origin(r.get("package", ""), r.get("version_local", "")),
-    ],
+    ["CVE", "sev", "pkg", "現在版"] + (["nixpkgs"] if tracker_loaded else []) + ["入口 (設定)"],
+    lambda r: [r.get("vuln_id", ""), r.get("severity", ""), r.get("package", ""), r.get("version_local", "")]
+    + ([_trk(r)] if tracker_loaded else [])
+    + [origin(r.get("package", ""), r.get("version_local", ""))],
     "🛑 NOTIFY / no-fix — 修正版なし (mitigation/受容/待ち)",
 )
 # ❓ UNKNOWN: 判定不能 (repology データ無し / 版解析失敗)。safe ではないので要確認 (#285a)。
 table(
     unknown,
-    ["CVE", "sev", "pkg", "現在版", "理由", "入口 (設定)"],
+    ["CVE", "sev", "pkg", "現在版", "理由"] + (["nixpkgs"] if tracker_loaded else []) + ["入口 (設定)"],
+    lambda r: [r.get("vuln_id", ""), r.get("severity", ""), r.get("package", ""), r.get("version_local", ""), r.get("classify", "")]
+    + ([_trk(r)] if tracker_loaded else [])
+    + [origin(r.get("package", ""), r.get("version_local", ""))],
+    "❓ UNKNOWN — 判定不能 (要確認・safe ではない)",
+)
+# 🔁 reclassified: Tracker が notaffected/notforus と判断し no-fix/UNKNOWN から降格 (#285c/#289)。
+table(
+    reclassified,
+    ["CVE", "sev", "pkg", "現在版", "元分類", "nixpkgs", "入口 (設定)"],
     lambda r: [
         r.get("vuln_id", ""),
         r.get("severity", ""),
         r.get("package", ""),
         r.get("version_local", ""),
         r.get("classify", ""),
+        _trk(r),
         origin(r.get("package", ""), r.get("version_local", "")),
     ],
-    "❓ UNKNOWN — 判定不能 (要確認・safe ではない)",
+    "🔁 reclassified — Nixpkgs Tracker が非該当判断 (要確認・whitelist 候補)",
 )
 # 🔍 spot-check: repology 非該当だが high-sev。誤判定保険の確認リスト (DROP は維持, #285b)。
 table(

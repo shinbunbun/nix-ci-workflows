@@ -38,6 +38,14 @@ on:
         description: 'repology triage 分類を実行する'
         type: boolean
         default: true
+      tracker:
+        description: 'Nixpkgs Security Tracker で no-fix/UNKNOWN を権威再検証する (#285c/#289)'
+        type: boolean
+        default: true
+      tracker-url:
+        description: 'Nixpkgs Security Tracker のベース URL'
+        type: string
+        default: 'https://tracker.security.nixos.org'
       vulnix-nocheck:
         description: 'vulnix を doCheck/checkPhase 無効版に差し替える (darwin で必須)'
         type: boolean
@@ -149,6 +157,24 @@ jobs:
             echo "::notice::TARGET から class/name を抽出できず、入口逆引きをスキップ"
           fi
 
+      - name: Re-verify via Nixpkgs Security Tracker (権威ソース)
+        if: always() && inputs.tracker
+        env:
+          TRACKER_URL: ${{ inputs.tracker-url }}
+        run: |
+          set -euo pipefail
+          # triage CSV の CVE を Nixpkgs Security Tracker に照会し {cve: status} を tracker.json に。
+          # repology 単独で出した no-fix/UNKNOWN を nixpkgs 権威ステータスで再検証する (#285c/#289)。
+          # 失敗しても scan は継続 (summary 側が tracker.json 無し = override 無しにフォールバック)。
+          CSV="$RUNNER_TEMP/vulns.triage.csv"
+          [ -f "$CSV" ] || CSV="$RUNNER_TEMP/vulns.csv"
+          if [ -f "$CSV" ]; then
+            nix run nixpkgs#python3 -- \
+              .nix-ci-workflows/ci/scripts/vulnxscan_tracker.py \
+              "$CSV" "$RUNNER_TEMP/tracker.json" "$TRACKER_URL" \
+              || { echo "::warning::tracker 照会失敗 (権威再検証 OFF で継続)"; rm -f "$RUNNER_TEMP/tracker.json"; }
+          fi
+
       - name: Build job summary
         if: always()
         env:
@@ -160,10 +186,12 @@ jobs:
           if [ -f "$CSV" ]; then
             # 第4引数 notify.json = NOTIFY を集約 (Issue 起票) 用に JSON 出力
             # 第5引数 roots.json = 入口 (設定) 逆引き用の宣言ルート (無ければ由来にフォールバック)
+            # 第6引数 tracker.json = Nixpkgs Security Tracker の {cve: status} (無ければ再検証 OFF)
             ROOTS="$RUNNER_TEMP/roots.json"; [ -f "$ROOTS" ] || ROOTS=""
+            TRACKER="$RUNNER_TEMP/tracker.json"; [ -f "$TRACKER" ] || TRACKER=""
             nix run nixpkgs#python3 -- \
               .nix-ci-workflows/ci/scripts/vulnxscan_summary.py \
-              "$CSV" "$TARGET" "$RUNNER_TEMP/closure.json" "$RUNNER_TEMP/notify.json" "$ROOTS" \
+              "$CSV" "$TARGET" "$RUNNER_TEMP/closure.json" "$RUNNER_TEMP/notify.json" "$ROOTS" "$TRACKER" \
               >> "$GITHUB_STEP_SUMMARY"
           else
             echo "## vulnxscan: 出力 CSV なし（スキャン失敗の可能性）" >> "$GITHUB_STEP_SUMMARY"

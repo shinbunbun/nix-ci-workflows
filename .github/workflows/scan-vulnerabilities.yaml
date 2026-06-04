@@ -46,6 +46,10 @@ on:
         description: 'Nixpkgs Security Tracker のベース URL'
         type: string
         default: 'https://tracker.security.nixos.org'
+      identity:
+        description: 'パッケージ identity (src.url) で UNKNOWN/spot-check の名前衝突 FP を検出する (#285)'
+        type: boolean
+        default: true
       vulnix-nocheck:
         description: 'vulnix を doCheck/checkPhase 無効版に差し替える (darwin で必須)'
         type: boolean
@@ -176,6 +180,39 @@ jobs:
               || { echo "::warning::tracker 照会失敗 (権威再検証 OFF で継続)"; rm -f "$RUNNER_TEMP/tracker.json"; }
           fi
 
+      - name: Verify package identity (名前衝突検出)
+        # triage 無効時は classify が無く対象 bucket (UNKNOWN/spot-check) も無いのでスキップ
+        if: always() && inputs.identity && inputs.triage
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          # UNKNOWN / spot-check の CVE について、nixpkgs の src.url repo と OSV の CVE repo を
+          # 突合せ、別ソフトに当たった名前衝突 FP を検出して identity.json に書く (#285)。
+          # src.url は scan した当の config の pkgs から eval する (= 実際にビルドした取得元)。
+          # TARGET (.#<class>.<name>.config...) から pkgs_base (.#<class>.<name>.pkgs) を組む。
+          CSV="$RUNNER_TEMP/vulns.triage.csv"
+          [ -f "$CSV" ] || CSV="$RUNNER_TEMP/vulns.csv"
+          CLASS=""; NAME=""
+          case "$TARGET" in
+            *nixosConfigurations.*) CLASS="nixosConfigurations" ;;
+            *darwinConfigurations.*) CLASS="darwinConfigurations" ;;
+          esac
+          PKGS_BASE=""
+          if [ -n "$CLASS" ]; then
+            rest="${TARGET#*${CLASS}.}"
+            NAME="${rest%%.*}"
+            [ -n "$NAME" ] && PKGS_BASE=".#${CLASS}.${NAME}.pkgs"
+          fi
+          if [ -f "$CSV" ]; then
+            # 失敗 (ネット/eval/PKGS_BASE 空) しても scan は継続。summary 側は identity.json
+            # 無し = 名前衝突検出 OFF にフォールバックする (= 現状維持で FN を増やさない)。
+            nix run nixpkgs#python3 -- \
+              .nix-ci-workflows/ci/scripts/vulnxscan_identity.py \
+              "$CSV" "$RUNNER_TEMP/identity.json" "$PKGS_BASE" \
+              || { echo "::warning::identity 照合失敗 (名前衝突検出 OFF で継続)"; rm -f "$RUNNER_TEMP/identity.json"; }
+          fi
+
       - name: Build job summary
         if: always()
         env:
@@ -188,11 +225,13 @@ jobs:
             # 第4引数 notify.json = NOTIFY を集約 (Issue 起票) 用に JSON 出力
             # 第5引数 roots.json = 入口 (設定) 逆引き用の宣言ルート (無ければ由来にフォールバック)
             # 第6引数 tracker.json = Nixpkgs Security Tracker の {cve: status} (無ければ再検証 OFF)
+            # 第7引数 identity.json = 名前衝突 FP {vuln_id: {...}} (無ければ名前衝突検出 OFF)
             ROOTS="$RUNNER_TEMP/roots.json"; [ -f "$ROOTS" ] || ROOTS=""
             TRACKER="$RUNNER_TEMP/tracker.json"; [ -f "$TRACKER" ] || TRACKER=""
+            IDENTITY="$RUNNER_TEMP/identity.json"; [ -f "$IDENTITY" ] || IDENTITY=""
             nix run nixpkgs#python3 -- \
               .nix-ci-workflows/ci/scripts/vulnxscan_summary.py \
-              "$CSV" "$TARGET" "$RUNNER_TEMP/closure.json" "$RUNNER_TEMP/notify.json" "$ROOTS" "$TRACKER" \
+              "$CSV" "$TARGET" "$RUNNER_TEMP/closure.json" "$RUNNER_TEMP/notify.json" "$ROOTS" "$TRACKER" "$IDENTITY" \
               >> "$GITHUB_STEP_SUMMARY"
           else
             echo "## vulnxscan: 出力 CSV なし（スキャン失敗の可能性）" >> "$GITHUB_STEP_SUMMARY"

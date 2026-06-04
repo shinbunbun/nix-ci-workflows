@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """vulnxscan の (triage) CSV を分類して job summary を生成する。
 
-usage: vulnxscan_summary.py <csv_path> <target> [closure_file] [notify_json_out] [roots_file] [tracker_file]
+usage: vulnxscan_summary.py <csv_path> <target> [closure_file] [notify_json_out] [roots_file] [tracker_file] [identity_file]
 
 分類 (auto-update-flake.lock 前提, dotfiles-private#276):
   NOTIFY = latest nixpkgs でも残る = 要対処
@@ -18,6 +18,9 @@ usage: vulnxscan_summary.py <csv_path> <target> [closure_file] [notify_json_out]
   🔁 reclassified = tracker_file ありの時、no-fix/UNKNOWN のうち Nixpkgs Security
           Tracker が notaffected/notforus と判断したもの (backport patch / 対象外)。
           silent DROP せず「要確認・whitelist 候補」として可視化する (#285c/#289)。
+  🚫 identity-mismatch = identity_file ありの時、UNKNOWN / spot-check のうち
+          名前衝突 (CVE が同名の別ソフトに当たった FP) と確定したもの。durable surface
+          から除外し job summary に監査ログとして残す (#285、vulnxscan_identity.py)。
   whitelist=True は確定FP/リスク受容として抑制 (件数のみ)
 
 closure_file (任意): `nix path-info -r [--json] <target>` の出力。
@@ -32,6 +35,10 @@ tracker_file (任意): vulnxscan_tracker.py の出力 ({cve: status})。Nixpkgs 
   Tracker の権威ステータスで repology 単独分類を再検証する (#285c/#289)。
   notaffected/notforus の no-fix/UNKNOWN を 🔁 reclassified に降格 (silent DROP せず
   可視化)、他は据え置き + nixpkgs 列に status 注記。無い/空なら override 無しで現状維持。
+identity_file (任意): vulnxscan_identity.py の出力 ({vuln_id: {package, nix_repo, cve_repo}})。
+  UNKNOWN / spot-check のうち名前衝突 FP と確定したものを 🚫 identity-mismatch に隔離し
+  durable surface (集約 Issue) から除外する。FN を増やさないため衝突は積極証拠がある時のみ
+  確定される (vulnxscan_identity.py 参照)。無い/空なら override 無しで現状維持。
 """
 import csv
 import json
@@ -46,6 +53,7 @@ closure_path = sys.argv[3] if len(sys.argv) > 3 else None
 notify_json_path = sys.argv[4] if len(sys.argv) > 4 else None
 roots_path = sys.argv[5] if len(sys.argv) > 5 else None
 tracker_path = sys.argv[6] if len(sys.argv) > 6 else None
+identity_path = sys.argv[7] if len(sys.argv) > 7 else None
 
 # 入口 (設定) 表示の調整: 入口が多い基盤ライブラリは個別列挙せず縮退する
 ENTRY_FANOUT_LIMIT = 6  # これを超える入口数 = 基盤依存 (config では直せない)
@@ -371,6 +379,39 @@ if tracker_loaded:
     nofix = _tracker_reverify(nofix)
     unknown = _tracker_reverify(unknown)
 
+# --- identity ガード: 名前衝突 FP を隔離 (#285、vulnxscan_identity.py) ---
+# identity.json: {vuln_id: {package, nix_repo, cve_repo}}。UNKNOWN / spot-check のうち
+# CVE が同名の別ソフトに当たった衝突 FP を 🚫 collision に移し durable surface から除外する。
+# 衝突は積極証拠 (src.url repo ≠ CVE repo, canonical 化後も不一致) がある時のみ確定済なので
+# FN を増やさない。データが無ければ素通し (現状維持)。
+identity_map = {}
+if identity_path:
+    try:
+        with open(identity_path) as idf:
+            identity_map = json.load(idf) or {}
+    except (OSError, json.JSONDecodeError):
+        identity_map = {}
+identity_loaded = bool(identity_map)
+collision = []
+
+
+def _identity_filter(bucket):
+    """bucket から衝突確定の row を抜き出し collision へ移す。残りを返す。"""
+    keep = []
+    for r in bucket:
+        info = identity_map.get(r.get("vuln_id", ""))
+        if info:
+            r["_identity"] = info
+            collision.append(r)
+        else:
+            keep.append(r)
+    return keep
+
+
+if identity_loaded:
+    unknown = _identity_filter(unknown)
+    spotcheck = _identity_filter(spotcheck)
+
 notify = fixable + nofix
 
 # 集約 (Issue 起票) 用に NOTIFY / UNKNOWN / spot-check / reclassified を JSON 出力。
@@ -385,6 +426,7 @@ if notify_json_path:
             d = {k: r.get(k, "") for k in keys}
             d["entry"] = origin(r.get("package", ""), r.get("version_local", ""))
             d["tracker"] = r.get("_tracker", "")  # nixpkgs 権威ステータス注記
+            d["identity"] = r.get("_identity", "")  # 名前衝突の repo 対 (collision のみ)
             out.append(d)
         return out
 
@@ -394,6 +436,9 @@ if notify_json_path:
         "unknown": _to_findings(unknown),
         "spotcheck": _to_findings(spotcheck),
         "reclassified": _to_findings(reclassified),
+        # collision は監査用。集約 (aggregate) は未知キーを無視するので Issue には出ない
+        # = durable surface から除外される (= FP 除去の目的)。
+        "collision": _to_findings(collision),
     }
     with open(notify_json_path, "w") as jf:
         json.dump(payload, jf, ensure_ascii=False)
@@ -407,9 +452,11 @@ print(
     + (f" ・ 🔁 reclassified {len(reclassified)}" if reclassified else "")
     + f" ・ INFO {len(info)} ・ DROP {len(drop)}"
     + (f" (🔍 spot-check {len(spotcheck)})" if spotcheck else "")
+    + (f" ・ 🚫 identity-mismatch {len(collision)}" if collision else "")
     + f" ・ whitelisted {len(whitelisted)}"
     + ("" if closure_path else "  _(closure 未指定: pin 検出 OFF)_")
     + ("" if tracker_loaded else "  _(tracker 未指定: 権威再検証 OFF)_")
+    + ("" if identity_loaded else "  _(identity 未指定: 名前衝突検出 OFF)_")
 )
 print()
 print(
@@ -422,6 +469,8 @@ print(
     " **nixpkgs** 列=Tracker の権威ステータス (affected/wontfix/notaffected/notforus、— は未登録)。"
     " INFO=auto-update で自動解決見込み・DROP=誤検知 "
     "(repology 非該当のうち high-sev は 🔍 **spot-check** に併載=誤判定保険、DROP は維持)。"
+    " 🚫 **identity-mismatch**=CVE が同名の別ソフトに当たった名前衝突 FP "
+    "(nixpkgs の src.url repo ≠ CVE の repo)。UNKNOWN/spot-check から除外し監査用に併記。"
     " 入口(設定)=その版を closure に入れた宣言 (systemPackages/home.packages) と"
     "ソースファイル。そこを更新/削除/service 無効化で解消できる。"
     "『基盤依存 (N 入口)』= 多数から参照される基盤ライブラリで config 単独では直せない"
@@ -511,6 +560,20 @@ table(
         origin(r.get("package", ""), r.get("version_local", "")),
     ],
     f"🔍 spot-check — repology 非該当・sev≥{HIGH_SEV_SPOTCHECK:g} (念のため確認・自動 DROP)",
+)
+# 🚫 identity-mismatch: 名前衝突 FP。監査用に nixpkgs / CVE の repo を併記 (#285)。
+table(
+    collision,
+    ["CVE", "sev", "pkg", "nixpkgs src repo", "CVE repo", "入口 (設定)"],
+    lambda r: [
+        r.get("vuln_id", ""),
+        r.get("severity", ""),
+        r.get("package", ""),
+        (r.get("_identity") or {}).get("nix_repo", ""),
+        (r.get("_identity") or {}).get("cve_repo", ""),
+        origin(r.get("package", ""), r.get("version_local", "")),
+    ],
+    "🚫 identity-mismatch — 名前衝突 FP (別ソフト確定・surface から除外)",
 )
 
 if info:

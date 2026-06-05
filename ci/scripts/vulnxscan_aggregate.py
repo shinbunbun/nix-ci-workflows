@@ -44,7 +44,7 @@ def short_target(t):
 def _new_entry():
     return {"severity": "", "packages": set(), "classifies": set(), "targets": set(),
             "cur": set(), "patch": set(), "entry": set(), "base_n": 0, "tracker": "",
-            "jrange": set()}
+            "jrange": set(), "fpreason": set()}
 
 
 def _accumulate(agg, target, fdg):
@@ -61,12 +61,20 @@ def _accumulate(agg, target, fdg):
     # nixpkgs (Tracker) ステータスは CVE 単位なので target 間で同一。非空を 1 つ保持。
     if fdg.get("tracker"):
         e["tracker"] = fdg["tracker"]
-    # judged (該当確定) の NVD CPE 版範囲。identity フィールドから抽出 (他 bucket は空)。
+    # identity フィールドから verdict 別の補助情報を抽出 (該当しない bucket は空のまま)。
     ident = fdg.get("identity")
-    if isinstance(ident, dict) and ident.get("verdict") == "affected":
-        jr = f"{ident.get('cpe', '')} {ident.get('range', '')}".strip()
-        if jr:
-            e["jrange"].add(jr)
+    if isinstance(ident, dict):
+        v = ident.get("verdict")
+        if v == "affected":  # judged の NVD CPE 版範囲
+            jr = f"{ident.get('cpe', '')} {ident.get('range', '')}".strip()
+            if jr:
+                e["jrange"].add(jr)
+        elif v == "disputed":  # likely-FP の NVD タグ降格理由 (#289)
+            st = ident.get("status", "")
+            tail = f" ({st})" if st and st.lower() == "rejected" else ""
+            e["fpreason"].add(f"NVD tag: {ident.get('reason', '')}{tail}")
+        elif v == "not_in_range":  # likely-FP の CPE 版範囲外降格理由 (#289)
+            e["fpreason"].add(f"版範囲外 {ident.get('cpe', '')} {ident.get('range', '')}".strip())
     if fdg.get("version_local"):
         e["cur"].add(fdg.get("version_local"))
     if fdg.get("version_nixpkgs"):
@@ -82,8 +90,9 @@ def _accumulate(agg, target, fdg):
             e["entry"].add(ent)
 
 
-# NOTIFY / judged / UNKNOWN / spot-check / reclassified を別集合で集約 (notify.json の各キー、無ければ空)。
-agg_notify, agg_judged, agg_unknown, agg_spot, agg_reclass = {}, {}, {}, {}, {}
+# NOTIFY / judged / UNKNOWN / spot-check / reclassified / likely-FP を別集合で集約
+# (notify.json の各キー、無ければ空)。
+agg_notify, agg_judged, agg_unknown, agg_spot, agg_reclass, agg_likely = {}, {}, {}, {}, {}, {}
 for path in sorted(glob.glob(os.path.join(signals_dir, "**", "notify.json"), recursive=True)):
     try:
         with open(path) as f:
@@ -101,6 +110,8 @@ for path in sorted(glob.glob(os.path.join(signals_dir, "**", "notify.json"), rec
         _accumulate(agg_spot, target, fdg)
     for fdg in data.get("reclassified", []):
         _accumulate(agg_reclass, target, fdg)
+    for fdg in data.get("likely_fp", []):
+        _accumulate(agg_likely, target, fdg)
 
 
 def _sort_items(agg):
@@ -114,6 +125,7 @@ judged_items = _sort_items(agg_judged)
 unknown_items = _sort_items(agg_unknown)
 spot_items = _sort_items(agg_spot)
 reclass_items = _sort_items(agg_reclass)
+likely_items = _sort_items(agg_likely)
 tracker_on = bool(reclass_items) or any(e["tracker"] for _, e in items + unknown_items)
 
 
@@ -132,6 +144,11 @@ def entrycol(e):
 def trkcol(e):
     """nixpkgs (Tracker) 権威ステータス列。未登録は — 。"""
     return e["tracker"] or "—"
+
+
+def fpreasoncol(e):
+    """🟢 likely-FP の降格理由列 (NVD タグ / 版範囲外)。"""
+    return ",".join(sorted(x for x in e["fpreason"] if x)) or "—"
 
 
 def _trk_h():
@@ -157,6 +174,8 @@ lines = [
     " ❓ **UNKNOWN**: repology にデータ無し/版解析失敗で判定不能 (safe ではない、要確認)。"
     " 🔁 **reclassified**: Nixpkgs Security Tracker が notaffected/notforus と判断 "
     "(backport patch/対象外) し no-fix/UNKNOWN から降格した要確認・whitelist 候補。"
+    " 🟢 **likely-FP**: no-fix のうち NVD の権威データ (cveTags=disputed 等 / 版範囲外) で"
+    "偽陽性疑いと判定し降格した要確認・whitelist 候補 (#289)。"
     " **nixpkgs** 列=Tracker の権威ステータス (affected/wontfix/notaffected/notforus、— は未登録)。"
     " 🔍 **spot-check**: repology は非該当判定だが high-sev のため誤判定保険として併載 (DROP 維持)。"
     " auto-update で直る分(INFO)と誤検知(DROP)は除外済。詳細分類は各 run の job summary 参照。"
@@ -167,6 +186,7 @@ lines = [
     + (f" ・ ✅ judged-affected {len(judged_items)}" if judged_items else "")
     + f" ・ ❓ UNKNOWN {len(unknown_items)}"
     + (f" ・ 🔁 reclassified {len(reclass_items)}" if reclass_items else "")
+    + (f" ・ 🟢 likely-FP {len(likely_items)}" if likely_items else "")
     + (f" ・ 🔍 spot-check {len(spot_items)}" if spot_items else ""),
     "",
 ]
@@ -200,16 +220,22 @@ if reclass_items:
         url = f"https://nvd.nist.gov/vuln/detail/{vid}"
         lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['classifies'])} | {trkcol(e)} | {entrycol(e)} | {joinset(e['targets'])} |")
     lines.append("")
+if likely_items:
+    lines += ["### 🟢 likely-FP — no-fix 偽陽性疑い (NVD タグ/版範囲・要確認・whitelist 候補)", "", "| CVE | sev | pkg | 現在版 | 降格理由 (NVD) | 入口 (設定) | 影響ターゲット |", "|---|---|---|---|---|---|---|"]
+    for vid, e in likely_items:
+        url = f"https://nvd.nist.gov/vuln/detail/{vid}"
+        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {fpreasoncol(e)} | {entrycol(e)} | {joinset(e['targets'])} |")
+    lines.append("")
 if spot_items:
     lines += ["### 🔍 spot-check — repology 非該当・high-sev (念のため確認・自動 DROP)", "", "| CVE | sev | pkg | 現在版 | 入口 (設定) | 影響ターゲット |", "|---|---|---|---|---|---|"]
     for vid, e in spot_items:
         url = f"https://nvd.nist.gov/vuln/detail/{vid}"
         lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {entrycol(e)} | {joinset(e['targets'])} |")
     lines.append("")
-# 要対処/要確認 = NOTIFY / judged / UNKNOWN / reclassified。judged は該当確定の要対処。
-# reclassified は「確認して whitelist する」人手 action が残るので open 維持。spot-check は DROP
-# 維持の「念のため」枠なので単独では Issue を open し続けない (常時 alarm 化を避ける)。
-has_content = bool(items or judged_items or unknown_items or reclass_items)
+# 要対処/要確認 = NOTIFY / judged / UNKNOWN / reclassified / likely-FP。judged は該当確定の要対処。
+# reclassified / likely-FP は「確認して whitelist する」人手 action が残るので open 維持。spot-check は
+# DROP 維持の「念のため」枠なので単独では Issue を open し続けない (常時 alarm 化を避ける)。
+has_content = bool(items or judged_items or unknown_items or reclass_items or likely_items)
 if not has_content:
     lines.append("✅ 現在 NOTIFY / UNKNOWN / reclassified 対象の脆弱性はありません。")
 else:
@@ -265,7 +291,7 @@ if st != 200 or not isinstance(issues, list):
     sys.exit(1)
 existing = next((it for it in issues if "pull_request" not in it), None)
 
-cnt = f"NOTIFY {len(items)} / judged {len(judged_items)} / UNKNOWN {len(unknown_items)} / reclassified {len(reclass_items)}"
+cnt = f"NOTIFY {len(items)} / judged {len(judged_items)} / UNKNOWN {len(unknown_items)} / reclassified {len(reclass_items)} / likely-FP {len(likely_items)}"
 if has_content:
     if existing:
         st, _ = req("PATCH", f"/repos/{repo}/issues/{existing['number']}", {"body": body, "state": "open"})

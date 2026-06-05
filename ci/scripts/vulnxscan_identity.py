@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""パッケージ identity 照合 + 版範囲判定で UNKNOWN/spot-check の精度を上げる (#285)。
+"""パッケージ identity 照合 + 版範囲判定で UNKNOWN/spot-check の精度を上げる (#285) +
+no-fix の偽陽性を権威ソースで降格する (#289)。
 
 usage: vulnxscan_identity.py <csv_path> <out_json> [pkgs_base]
 
@@ -12,6 +13,17 @@ vulnxscan/grype/osv は CVE を Nix パッケージに **名前 (pname) だけ**
       jellyfin(server↔jellyfin-ios)/malcontent(GNOME↔chainguard)/zlib(madler↔ruby)。
   verdict=affected  : repology が判定不能/非該当としたが、NVD CPE の版範囲で **該当が確定**。
       UNKNOWN/spot-check から NOTIFY へ昇格する (#285 本丸の「判定」)。実例 taglib(<2.0)/avahi(<0.9)。
+
+#289 (no-fix 偽陽性の降格)。no-fix (fix_not_available) は repology 単独の fallthrough 判定で、
+修正版が実在する/そもそも該当しない CVE が「修正版なし=要対処」に居座る偽陽性がある。これを NVD の
+権威データで降格する (降格先は silent DROP ではなく可視バケツ 🟢 likely-FP = 要確認・whitelist 候補):
+
+  verdict=disputed     : NVD cveTags が disputed / unsupported-when-assigned /
+      exclusively-hosted-service、または vulnStatus=Rejected。ベンダー否認 / 採番時 EOL /
+      配布物でなくホスト型サービスの脆弱性 = パッケージ scan では偽陽性寄り。実例 gcc(CVE-2023-4039)/
+      openssh(CVE-2023-51767 rowhammer、いずれも disputed)。
+  verdict=not_in_range : NVD CPE の vendor 一致・product 一致の版範囲が **全て clean に「範囲外」**
+      (True/None が 1 つも無い時のみ)。古い CVE の上限を現在版が超えている偽陽性。affected の対称判定。
 
 判定 anchor は homepage でなく **src.url (= 実際にビルドしている取得元)**。
   - 名前衝突: nix=src.url の owner/repo、CVE=OSV references の GHSA advisory repo (無ければ NVD
@@ -26,14 +38,18 @@ vulnxscan/grype/osv は CVE を Nix パッケージに **名前 (pname) だけ**
   - affected は **昇格のみ** (promote-only)。判定できない/版が不一致なら UNKNOWN 据え置き
     (= 現状維持) で、降格 (DROP) は一切しない。よって FN は構造的に増えない。version 比較は
     clean な dotted-numeric 同士に限定し、vendor ゲートを通った CPE のみ使う (誤昇格=FP を防ぐ)。
+  - disputed / not_in_range (#289) は no-fix を **silent DROP しない**。降格先 🟢 likely-FP は
+    集約 Issue にも出る「要確認・whitelist 候補」枠なので、誤って降格しても finding は surface に
+    残る (= 隠れ FN にならない)。not_in_range は vendor+product 一致の全 range が clean に「範囲外」
+    の時だけ確定し、True/None が 1 つでもあれば降格しない (= 不確実は no-fix 据え置きで保守)。
 
-対象は UNKNOWN (err_missing_repology_version / err_invalid_version) と repology 非該当
-(err_not_vulnerable_based_on_repology かつ sev >= ADJUDICATE_SEV。既定 0 = 数値 sev 全件)。
-旧実装は後者を sev>=9 の spot-check だけ判定していたが、repology は非権威なので低 sev の
-silent DROP も FN になりうる。NOTIFY 等は触らない。
+対象は UNKNOWN (err_missing_repology_version / err_invalid_version)、repology 非該当
+(err_not_vulnerable_based_on_repology かつ sev >= ADJUDICATE_SEV。既定 0 = 数値 sev 全件)、
+および no-fix (fix_not_available、#289)。旧実装は非該当を sev>=9 の spot-check だけ判定していたが、
+repology は非権威なので低 sev の silent DROP も FN になりうる。no-fix 以外の NOTIFY (fixable) は触らない。
 
 出力 out_json: {vuln_id: {verdict, package, ...}}。summary 側が collision を 🚫 identity-mismatch、
-affected を ✅ judged-affected に振り分ける。
+affected を ✅ judged-affected、disputed / not_in_range を 🟢 likely-FP に振り分ける。
 
 ネットワーク/eval 失敗は全て安全側 (collision/affected を出さない) に倒し exit 0 (scan 継続)。
 """
@@ -60,6 +76,12 @@ NVD_DELAY = float(os.environ.get("NVD_DELAY", "1.5" if NVD_KEY else "6.5"))
 # summary.py の UNKNOWN_CLASSIFY と一致させること。
 UNKNOWN_CLASSIFY = {"err_missing_repology_version", "err_invalid_version"}
 SPOTCHECK_CLASSIFY = "err_not_vulnerable_based_on_repology"
+# no-fix (修正版なし) の偽陽性を権威ソースで降格する対象 classify (#289)。
+NOFIX_CLASSIFY = "fix_not_available"
+# NVD cveTags のうち no-fix を 🟢 likely-FP に降格してよいタグ (#289)。disputed=ベンダー否認、
+# unsupported-when-assigned=採番時に対象版が EOL、exclusively-hosted-service=配布物でなく
+# ホスト型サービスの脆弱性 (パッケージ scan では非該当寄り)。いずれも silent DROP せず可視化。
+DEMOTE_TAGS = {"disputed", "unsupported-when-assigned", "exclusively-hosted-service"}
 # repology が「非該当」と返した finding を該当判定 (Phase 2) にかける severity 下限。
 # 旧実装は sev>=9 の spot-check だけ判定していたが、repology は非権威なので sev<9 を
 # 黙って DROP すると FN になる。既定 0.0 = 数値 sev を持つ err_not_vulnerable 全件を判定し、
@@ -200,17 +222,19 @@ def osv_fetch(cve, opener=None):
 
 
 def nvd_fetch(cve, opener=None):
-    """NVD レコードから {repo, cpe:[(vendor, product, bounds)]}。失敗は空。
-    repo は references の GHSA repo (Phase 1b)、cpe は vulnerable な版範囲付き match (Phase 2)。"""
+    """NVD レコードから {repo, cpe:[(vendor, product, bounds)], tags:set, status:str}。失敗は空。
+    repo は references の GHSA repo (Phase 1b)、cpe は vulnerable な版範囲付き match (Phase 2)、
+    tags/status は cveTags / vulnStatus (#289 の no-fix 降格用、disputed/Rejected 等)。"""
     headers = {"Accept": "application/json"}
     if NVD_KEY:
         headers["apiKey"] = NVD_KEY
     data = _http_json(NVD_API + urllib.parse.quote(cve), headers, opener)
+    empty = {"repo": None, "cpe": [], "tags": set(), "status": ""}
     if not data:
-        return {"repo": None, "cpe": []}
+        return empty
     vulns = data.get("vulnerabilities", [])
     if not vulns:
-        return {"repo": None, "cpe": []}
+        return empty
     cve_o = vulns[0].get("cve", {})
     refs = [r.get("url", "") for r in cve_o.get("references", []) or []]
     cpe = []
@@ -228,7 +252,13 @@ def nvd_fetch(cve, opener=None):
                     "versionEndIncluding", "versionEndExcluding") if k in m}
                 if bounds:
                     cpe.append((vendor, product, bounds))
-    return {"repo": _repo_from_refs(refs), "cpe": cpe}
+    # cveTags は [{sourceIdentifier, tags:[...]}, ...]。全 source の tags を平坦化して集める。
+    tags = set()
+    for ct in cve_o.get("cveTags", []) or []:
+        for t in ct.get("tags", []) or []:
+            tags.add(str(t).lower())
+    return {"repo": _repo_from_refs(refs), "cpe": cpe,
+            "tags": tags, "status": str(cve_o.get("vulnStatus", ""))}
 
 
 # ----------------------------- nix 側 identity -----------------------------
@@ -346,12 +376,36 @@ def adjudicate_affected(pname, inst_ver, cpe_list, tokens):
     return None
 
 
+def adjudicate_not_affected(pname, inst_ver, cpe_list, tokens):
+    """affected の対称 (#289)。product≈pname かつ vendor∈tokens の range だけ見て、それらが
+    **全て clean に「範囲外 (False)」** の時だけ (range 文字列, 'vendor:product') を返す。
+    True (該当) や None (判定不能・不純な版/上限なし) が 1 つでもあれば None = 降格しない
+    (= no-fix 据え置きで保守、隠れ FN を作らない)。一致 CPE が無くても None。"""
+    target = _norm(pname)
+    matched = []
+    for vendor, product, bounds in cpe_list:
+        if _norm(product) != target:
+            continue
+        if vendor not in tokens:  # vendor ゲート: affected と同じ誤適用防止
+            continue
+        matched.append((vendor, product, bounds, in_affected_range(inst_ver, bounds)))
+    if not matched:
+        return None
+    if any(v is not False for _, _, _, v in matched):  # True/None があれば降格不可
+        return None
+    rng = ";".join(",".join(f"{k}={x}" for k, x in b.items()) for _, _, b, _ in matched)
+    vp = matched[0]
+    return (rng, f"{vp[0]}:{vp[1]}")
+
+
 # ----------------------------- 候補収集・統合判定 -----------------------------
 def collect_candidates(csv_path):
-    """判定対象の {pname: [(vuln_id, version_local), ...]}。
+    """判定対象の {pname: [(vuln_id, version_local, classify), ...]}。
     対象 = UNKNOWN (repology 判定不能) + err_not_vulnerable (repology 非該当) のうち数値 sev が
-    ADJUDICATE_SEV 以上のもの。後者は旧実装の sev>=9 spot-check 限定から全 sev へ拡張し、
-    repology が黙って DROP していた低 sev の見逃し (FN) も NVD CPE で再判定する (#285)。"""
+    ADJUDICATE_SEV 以上のもの + no-fix (fix_not_available、#289)。err_not_vulnerable は旧実装の
+    sev>=9 spot-check 限定から全 sev へ拡張し、repology が黙って DROP していた低 sev の見逃し (FN)
+    も NVD CPE で再判定する (#285)。no-fix は detect 側で昇格でなく降格 (disputed/not_in_range) に回す。
+    classify を 3 要素目に持たせ、detect が昇格 (UNKNOWN/非該当) と降格 (no-fix) を振り分ける。"""
     out = {}
     try:
         with open(csv_path) as f:
@@ -368,11 +422,12 @@ def collect_candidates(csv_path):
         is_unknown = cl in UNKNOWN_CLASSIFY
         sev_str = (r.get("severity") or "").strip()
         is_notvuln = cl == SPOTCHECK_CLASSIFY and sev_str != "" and sevf(sev_str) >= ADJUDICATE_SEV
-        if not (is_unknown or is_notvuln):
+        is_nofix = cl == NOFIX_CLASSIFY
+        if not (is_unknown or is_notvuln or is_nofix):
             continue
         pkg = (r.get("package") or "").strip()
         if pkg:
-            out.setdefault(pkg, []).append((vid, (r.get("version_local") or "").strip()))
+            out.setdefault(pkg, []).append((vid, (r.get("version_local") or "").strip(), cl))
     return out
 
 
@@ -392,17 +447,19 @@ def detect(csv_path, pkgs_base, osv_fn=None, nvd_fn=None, nixrepo_fn=None,
     for pkg, items in candidates.items():
         src = nixrepo_fn(pkg, pkgs_base)
         tokens = None  # lazy: homepage eval は範囲判定が要る時だけ
-        for vid, inst in items:
+        for vid, inst, cls in items:
             if vid in result:  # 同一 CVE が複数 pkg に跨る時の二重判定を避ける (先勝ち)
                 continue
+            is_nofix = cls == NOFIX_CLASSIFY
             try:
-                # ① OSV repo で衝突確定なら NVD を引かずに終了 (NVD rate-limit 節約)
+                # ① OSV repo で衝突確定なら NVD を引かずに終了 (NVD rate-limit 節約)。
+                #    衝突 (別ソフト確定) は no-fix/UNKNOWN を問わず純粋な FP なので共通。
                 osv_repo = osv_fn(vid).get("repo")
                 if src and osv_repo and collision_fn(src, osv_repo):
                     result[vid] = {"verdict": "collision", "package": pkg,
                                    "nix_repo": "/".join(src), "cve_repo": "/".join(osv_repo)}
                     continue
-                # ② NVD を引く (repo=Phase1b フォールバック + cpe=Phase2 版範囲)
+                # ② NVD を引く (repo=Phase1b フォールバック + cpe=Phase2 版範囲 + tags/status=#289)
                 if nvd_calls:
                     sleep_fn(NVD_DELAY)  # 2 件目以降は間隔を空ける (429/403 回避)
                 nvd_calls += 1
@@ -411,6 +468,27 @@ def detect(csv_path, pkgs_base, osv_fn=None, nvd_fn=None, nixrepo_fn=None,
                 if src and cve_repo and collision_fn(src, cve_repo):
                     result[vid] = {"verdict": "collision", "package": pkg,
                                    "nix_repo": "/".join(src), "cve_repo": "/".join(cve_repo)}
+                    continue
+                if is_nofix:
+                    # #289: no-fix は降格判定のみ (昇格しない。既に NOTIFY のため)。
+                    # (a) cveTags / vulnStatus による disputed 降格 (権威・ゼロ FN)
+                    tags = nvd.get("tags") or set()
+                    bad = tags & DEMOTE_TAGS
+                    status = nvd.get("status") or ""
+                    if bad or status.lower() == "rejected":
+                        result[vid] = {"verdict": "disputed", "package": pkg,
+                                       "reason": ",".join(sorted(bad)) or "rejected",
+                                       "tags": sorted(tags), "status": status, "source": "nvd"}
+                        continue
+                    # (b) NVD CPE 版範囲が全て「範囲外」なら not_in_range 降格 (affected の対称)
+                    if nvd.get("cpe"):
+                        if tokens is None:
+                            tokens = nix_tokens(src, nixhome_fn(pkg, pkgs_base))
+                        nia = adjudicate_not_affected(pkg, inst, nvd["cpe"], tokens)
+                        if nia:
+                            result[vid] = {"verdict": "not_in_range", "package": pkg,
+                                           "version": inst, "range": nia[0],
+                                           "cpe": nia[1], "source": "nvd"}
                     continue
                 if nvd.get("cpe"):
                     if tokens is None:
@@ -441,9 +519,11 @@ def main(argv):
         result = {}
     with open(out_path, "w") as f:
         json.dump(result, f, ensure_ascii=False)
-    nc = sum(1 for v in result.values() if v.get("verdict") == "collision")
-    na = sum(1 for v in result.values() if v.get("verdict") == "affected")
-    sys.stderr.write(f"identity: 名前衝突 {nc} 件 / 該当確定 (昇格) {na} 件\n")
+    def _cnt(v):
+        return sum(1 for x in result.values() if x.get("verdict") == v)
+    sys.stderr.write(
+        f"identity: 名前衝突 {_cnt('collision')} 件 / 該当確定 (昇格) {_cnt('affected')} 件 / "
+        f"no-fix 降格 disputed {_cnt('disputed')} 件・範囲外 {_cnt('not_in_range')} 件\n")
     return 0
 
 

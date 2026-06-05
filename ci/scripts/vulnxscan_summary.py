@@ -395,29 +395,36 @@ if identity_path:
 identity_loaded = bool(identity_map)
 collision = []  # verdict=collision: 名前衝突 FP (除外)
 judged = []     # verdict=affected: NVD 版範囲で該当確定 (UNKNOWN/spot-check/DROP → NOTIFY 昇格)
+likely_fp = []  # verdict=disputed / not_in_range: no-fix 偽陽性疑い (#289、no-fix → 降格)
 _seen_verdict = set()  # spotcheck⊂drop で同一 row が二重昇格しないよう vuln_id で抑止
 
 
 def _identity_filter(bucket):
-    """bucket から verdict 付き row を抜き出す。collision は除外、affected は昇格 (judged)。
-    同一 vuln_id は 1 度だけ処理し、残り (判定なし) はそのまま返す。"""
+    """bucket から verdict 付き row を抜き出す。collision は除外、affected は昇格 (judged)、
+    disputed / not_in_range は no-fix の偽陽性降格 (likely_fp、#289)。同一 vuln_id は 1 度だけ
+    処理し、残り (判定なし) はそのまま返す。"""
+    dest_of = {"collision": collision, "affected": judged,
+               "disputed": likely_fp, "not_in_range": likely_fp}
     keep = []
     for r in bucket:
         vid = r.get("vuln_id", "")
         info = identity_map.get(vid)
-        verdict = (info or {}).get("verdict")
-        if verdict in ("collision", "affected"):
+        dest = dest_of.get((info or {}).get("verdict"))
+        if dest is not None:
             if vid not in _seen_verdict:
                 _seen_verdict.add(vid)
                 r["_identity"] = info
-                (collision if verdict == "collision" else judged).append(r)
-            # 既処理 (別 bucket で昇格/除外済) の重複はこの bucket から取り除くだけ
+                dest.append(r)
+            # 既処理 (別 bucket で昇格/降格/除外済) の重複はこの bucket から取り除くだけ
         else:
             keep.append(r)
     return keep
 
 
 if identity_loaded:
+    # no-fix は #289 の降格 (disputed/not_in_range) と名前衝突を抜く。tracker 降格 (reclassified)
+    # の後に通すので、両方該当する CVE は reclassified が優先される (Nixpkgs 権威を上位扱い)。
+    nofix = _identity_filter(nofix)
     unknown = _identity_filter(unknown)
     spotcheck = _identity_filter(spotcheck)
     # #1: repology が非該当として DROP した分 (spot-check 未満の sev 含む) も該当判定で救済。
@@ -451,6 +458,9 @@ if notify_json_path:
         # judged = NVD 版範囲で該当確定し UNKNOWN/spot-check から昇格 (#285)。NOTIFY 級として
         # 集約 Issue に surface する (aggregate が judged キーを描画)。
         "judged": _to_findings(judged),
+        # likely_fp = no-fix のうち NVD タグ (disputed 等) / 版範囲外で偽陽性疑いと判定し降格 (#289)。
+        # silent DROP せず「要確認・whitelist 候補」として集約 Issue にも surface する。
+        "likely_fp": _to_findings(likely_fp),
         # collision は監査用。集約 (aggregate) は未知キーを無視するので Issue には出ない
         # = durable surface から除外される (= FP 除去の目的)。
         "collision": _to_findings(collision),
@@ -466,6 +476,7 @@ print(
     + (f"・ ✅ judged-affected {len(judged)} " if judged else "")
     + f"・ ❓ UNKNOWN {len(unknown)}"
     + (f" ・ 🔁 reclassified {len(reclassified)}" if reclassified else "")
+    + (f" ・ 🟢 likely-FP {len(likely_fp)}" if likely_fp else "")
     + f" ・ INFO {len(info)} ・ DROP {len(drop)}"
     + (f" (🔍 spot-check {len(spotcheck)})" if spotcheck else "")
     + (f" ・ 🚫 identity-mismatch {len(collision)}" if collision else "")
@@ -484,6 +495,9 @@ print(
     " ❓ **UNKNOWN**=repology にデータ無し/版解析失敗で判定不能 (safe ではない、要確認)。"
     " 🔁 **reclassified**=Nixpkgs Security Tracker が notaffected/notforus と判断 "
     "(backport patch/対象外)。no-fix/UNKNOWN から降格した要確認・whitelist 候補。"
+    " 🟢 **likely-FP**=no-fix のうち NVD の権威データで偽陽性疑いと判定し降格 (#289)。"
+    "cveTags が disputed/unsupported-when-assigned/exclusively-hosted-service (or vulnStatus=Rejected)、"
+    "または CPE 版範囲が全て範囲外。silent DROP せず要確認・whitelist 候補として残す。"
     " **nixpkgs** 列=Tracker の権威ステータス (affected/wontfix/notaffected/notforus、— は未登録)。"
     " INFO=auto-update で自動解決見込み・DROP=誤検知 "
     "(repology 非該当のうち high-sev は 🔍 **spot-check** に併載=誤判定保険、DROP は維持)。"
@@ -581,6 +595,35 @@ table(
         origin(r.get("package", ""), r.get("version_local", "")),
     ],
     "🔁 reclassified — Nixpkgs Tracker が非該当判断 (要確認・whitelist 候補)",
+)
+
+
+def _fp_reason(r):
+    """🟢 likely-FP の降格理由列。disputed は NVD タグ、not_in_range は CPE 版範囲。"""
+    info = r.get("_identity") or {}
+    v = info.get("verdict")
+    if v == "disputed":
+        st = info.get("status", "")
+        tag = info.get("reason", "")
+        return f"NVD tag: {tag}" + (f" ({st})" if st and st.lower() == "rejected" else "")
+    if v == "not_in_range":
+        return f"版範囲外 {info.get('cpe', '')} {info.get('range', '')}".strip()
+    return ""
+
+
+# 🟢 likely-FP: no-fix のうち NVD タグ/版範囲で偽陽性疑い。降格理由を併記 (#289)。
+table(
+    likely_fp,
+    ["CVE", "sev", "pkg", "現在版", "降格理由 (NVD)", "入口 (設定)"],
+    lambda r: [
+        r.get("vuln_id", ""),
+        r.get("severity", ""),
+        r.get("package", ""),
+        r.get("version_local", ""),
+        _fp_reason(r),
+        origin(r.get("package", ""), r.get("version_local", "")),
+    ],
+    "🟢 likely-FP — no-fix 偽陽性疑い (NVD タグ/版範囲・要確認・whitelist 候補)",
 )
 # 🔍 spot-check: repology 非該当だが high-sev。誤判定保険の確認リスト (DROP は維持, #285b)。
 table(

@@ -394,22 +394,24 @@ if identity_path:
         identity_map = {}
 identity_loaded = bool(identity_map)
 collision = []  # verdict=collision: 名前衝突 FP (除外)
-judged = []     # verdict=affected: NVD 版範囲で該当確定 (UNKNOWN/spot-check → NOTIFY 昇格)
+judged = []     # verdict=affected: NVD 版範囲で該当確定 (UNKNOWN/spot-check/DROP → NOTIFY 昇格)
+_seen_verdict = set()  # spotcheck⊂drop で同一 row が二重昇格しないよう vuln_id で抑止
 
 
 def _identity_filter(bucket):
     """bucket から verdict 付き row を抜き出す。collision は除外、affected は昇格 (judged)。
-    残り (判定なし) はそのまま返す。"""
+    同一 vuln_id は 1 度だけ処理し、残り (判定なし) はそのまま返す。"""
     keep = []
     for r in bucket:
-        info = identity_map.get(r.get("vuln_id", ""))
+        vid = r.get("vuln_id", "")
+        info = identity_map.get(vid)
         verdict = (info or {}).get("verdict")
-        if verdict == "collision":
-            r["_identity"] = info
-            collision.append(r)
-        elif verdict == "affected":
-            r["_identity"] = info
-            judged.append(r)
+        if verdict in ("collision", "affected"):
+            if vid not in _seen_verdict:
+                _seen_verdict.add(vid)
+                r["_identity"] = info
+                (collision if verdict == "collision" else judged).append(r)
+            # 既処理 (別 bucket で昇格/除外済) の重複はこの bucket から取り除くだけ
         else:
             keep.append(r)
     return keep
@@ -418,6 +420,9 @@ def _identity_filter(bucket):
 if identity_loaded:
     unknown = _identity_filter(unknown)
     spotcheck = _identity_filter(spotcheck)
+    # #1: repology が非該当として DROP した分 (spot-check 未満の sev 含む) も該当判定で救済。
+    # spotcheck は drop の部分集合なので _seen_verdict で二重昇格を防ぐ。
+    drop = _identity_filter(drop)
 
 notify = fixable + nofix
 
@@ -474,8 +479,8 @@ print(
     "> **凡例** — NOTIFY = latest nixpkgs でも残る要対処 CVE。"
     "🔧 **fixable**: nixpkgs に修正版あり、pin 解消/更新で直る（パッチ版を明記）。"
     "🛑 **no-fix**: 修正版が存在しない → Remove/Replace/Mitigate/受容(whitelist)/待ち。"
-    " ✅ **judged-affected**=repology が判定できなかったが NVD CPE の版範囲で該当確定 "
-    "(UNKNOWN/spot-check から NOTIFY へ昇格、vendor 一致 + clean 版のみの保守判定)。"
+    " ✅ **judged-affected**=repology が判定不能/非該当としたが NVD CPE の版範囲で該当確定 "
+    "(UNKNOWN/spot-check/repology 非該当 DROP から NOTIFY へ昇格、vendor 一致 + clean 版のみの保守判定)。"
     " ❓ **UNKNOWN**=repology にデータ無し/版解析失敗で判定不能 (safe ではない、要確認)。"
     " 🔁 **reclassified**=Nixpkgs Security Tracker が notaffected/notforus と判断 "
     "(backport patch/対象外)。no-fix/UNKNOWN から降格した要確認・whitelist 候補。"
@@ -535,7 +540,7 @@ table(
         f"{(r.get('_identity') or {}).get('cpe', '')} {(r.get('_identity') or {}).get('range', '')}".strip(),
         origin(r.get("package", ""), r.get("version_local", "")),
     ],
-    "✅ NOTIFY / judged-affected — NVD 版範囲で該当確定 (UNKNOWN/spot-check から昇格)",
+    "✅ NOTIFY / judged-affected — NVD 版範囲で該当確定 (repology の判定不能/非該当から昇格)",
 )
 
 

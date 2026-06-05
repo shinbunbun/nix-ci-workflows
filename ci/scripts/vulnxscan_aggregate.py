@@ -289,7 +289,15 @@ st, issues = req("GET", f"/repos/{repo}/issues?labels={LABEL}&state=open&per_pag
 if st != 200 or not isinstance(issues, list):
     print(f"::error::issue 一覧取得に失敗 (status={st})。重複起票回避のため中断します。")
     sys.exit(1)
-existing = next((it for it in issues if "pull_request" not in it), None)
+# 対象は自動生成レポート issue だけ。`vulnxscan` ラベルは他の手動 issue (機能 Issue 等) にも
+# 付くため「ラベル先頭一致」では別 issue を誤って上書きしうる (実害例: #294 を上書き)。
+# MARKER (本文先頭の隠しコメント) または完全一致タイトルで本レポート issue のみを選ぶ。
+existing = next(
+    (it for it in issues
+     if "pull_request" not in it
+     and (MARKER in (it.get("body") or "") or it.get("title") == TITLE)),
+    None,
+)
 
 cnt = f"NOTIFY {len(items)} / judged {len(judged_items)} / UNKNOWN {len(unknown_items)} / reclassified {len(reclass_items)} / likely-FP {len(likely_items)}"
 if has_content:

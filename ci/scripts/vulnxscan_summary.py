@@ -438,7 +438,7 @@ if notify_json_path:
             d = {k: r.get(k, "") for k in keys}
             d["entry"] = origin(r.get("package", ""), r.get("version_local", ""))
             d["tracker"] = r.get("_tracker", "")  # nixpkgs 権威ステータス注記
-            d["identity"] = r.get("_identity", "")  # 名前衝突の repo 対 (collision のみ)
+            d["identity"] = r.get("_identity", "")  # collision の repo 対 / judged の cpe・range
             out.append(d)
         return out
 

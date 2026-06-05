@@ -27,8 +27,10 @@ vulnxscan/grype/osv は CVE を Nix パッケージに **名前 (pname) だけ**
     (= 現状維持) で、降格 (DROP) は一切しない。よって FN は構造的に増えない。version 比較は
     clean な dotted-numeric 同士に限定し、vendor ゲートを通った CPE のみ使う (誤昇格=FP を防ぐ)。
 
-対象は UNKNOWN (err_missing_repology_version / err_invalid_version) と high-sev spot-check
-(err_not_vulnerable_based_on_repology かつ sev >= SPOTCHECK_SEV) のみ。NOTIFY 等は触らない。
+対象は UNKNOWN (err_missing_repology_version / err_invalid_version) と repology 非該当
+(err_not_vulnerable_based_on_repology かつ sev >= ADJUDICATE_SEV。既定 0 = 数値 sev 全件)。
+旧実装は後者を sev>=9 の spot-check だけ判定していたが、repology は非権威なので低 sev の
+silent DROP も FN になりうる。NOTIFY 等は触らない。
 
 出力 out_json: {vuln_id: {verdict, package, ...}}。summary 側が collision を 🚫 identity-mismatch、
 affected を ✅ judged-affected に振り分ける。
@@ -55,10 +57,15 @@ NVD_KEY = os.environ.get("NVD_API_KEY", "").strip()
 # NVD は API key 無しで 5 req/30s。429/403 を避けるため呼び出し間隔を空ける (key ありは短縮)。
 NVD_DELAY = float(os.environ.get("NVD_DELAY", "1.5" if NVD_KEY else "6.5"))
 
-# summary.py の UNKNOWN_CLASSIFY / HIGH_SEV_SPOTCHECK と一致させること。
+# summary.py の UNKNOWN_CLASSIFY と一致させること。
 UNKNOWN_CLASSIFY = {"err_missing_repology_version", "err_invalid_version"}
 SPOTCHECK_CLASSIFY = "err_not_vulnerable_based_on_repology"
-SPOTCHECK_SEV = 9.0
+# repology が「非該当」と返した finding を該当判定 (Phase 2) にかける severity 下限。
+# 旧実装は sev>=9 の spot-check だけ判定していたが、repology は非権威なので sev<9 を
+# 黙って DROP すると FN になる。既定 0.0 = 数値 sev を持つ err_not_vulnerable 全件を判定し、
+# NVD CPE が該当と確定したものだけ NOTIFY に昇格する (promote-only)。NVD 呼び出しが増える
+# (key 推奨) ので、コスト調整したい場合は ADJUDICATE_SEV を上げて高 sev だけに絞れる。
+ADJUDICATE_SEV = float(os.environ.get("ADJUDICATE_SEV", "0"))
 
 # CVE 側 repo 抽出で「上流プロジェクトではない」インフラ系をはじく host / owner。
 INFRA_HOSTS = {
@@ -339,7 +346,10 @@ def adjudicate_affected(pname, inst_ver, cpe_list, tokens):
 
 # ----------------------------- 候補収集・統合判定 -----------------------------
 def collect_candidates(csv_path):
-    """対象 bucket (UNKNOWN + high-sev spot-check) の {pname: [(vuln_id, version_local), ...]}。"""
+    """判定対象の {pname: [(vuln_id, version_local), ...]}。
+    対象 = UNKNOWN (repology 判定不能) + err_not_vulnerable (repology 非該当) のうち数値 sev が
+    ADJUDICATE_SEV 以上のもの。後者は旧実装の sev>=9 spot-check 限定から全 sev へ拡張し、
+    repology が黙って DROP していた低 sev の見逃し (FN) も NVD CPE で再判定する (#285)。"""
     out = {}
     try:
         with open(csv_path) as f:
@@ -354,8 +364,9 @@ def collect_candidates(csv_path):
         if not CVE_RE.match(vid):
             continue
         is_unknown = cl in UNKNOWN_CLASSIFY
-        is_spot = cl == SPOTCHECK_CLASSIFY and sevf(r.get("severity")) >= SPOTCHECK_SEV
-        if not (is_unknown or is_spot):
+        sev_str = (r.get("severity") or "").strip()
+        is_notvuln = cl == SPOTCHECK_CLASSIFY and sev_str != "" and sevf(sev_str) >= ADJUDICATE_SEV
+        if not (is_unknown or is_notvuln):
             continue
         pkg = (r.get("package") or "").strip()
         if pkg:

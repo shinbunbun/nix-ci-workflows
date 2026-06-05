@@ -152,8 +152,8 @@ lines = [
     "",
     "> **凡例** — 🔧 **fixable**: nixpkgs に修正版あり、pin 解消/更新で直る（パッチ版明記）。"
     " 🛑 **no-fix**: 修正版が存在しない → Remove/Replace/Mitigate/受容(whitelist.csv)/upstream 待ち。"
-    " ✅ **judged-affected**: repology が判定できなかったが NVD CPE の版範囲で該当確定し "
-    "UNKNOWN/spot-check から昇格 (vendor 一致 + clean 版のみの保守判定)。"
+    " ✅ **judged-affected**: repology が判定不能/非該当としたが NVD CPE の版範囲で該当確定し "
+    "UNKNOWN/spot-check/非該当 DROP から昇格 (vendor 一致 + clean 版のみの保守判定)。"
     " ❓ **UNKNOWN**: repology にデータ無し/版解析失敗で判定不能 (safe ではない、要確認)。"
     " 🔁 **reclassified**: Nixpkgs Security Tracker が notaffected/notforus と判断 "
     "(backport patch/対象外) し no-fix/UNKNOWN から降格した要確認・whitelist 候補。"
@@ -177,7 +177,7 @@ if fixable:
         lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['patch'])} | {entrycol(e)} | {joinset(e['targets'])} |")
     lines.append("")
 if judged_items:
-    lines += ["### ✅ judged-affected — NVD 版範囲で該当確定 (UNKNOWN/spot-check から昇格)", "", "| CVE | sev | pkg | 現在版 | 判定 (NVD CPE) | 入口 (設定) | 影響ターゲット |", "|---|---|---|---|---|---|---|"]
+    lines += ["### ✅ judged-affected — NVD 版範囲で該当確定 (repology の判定不能/非該当から昇格)", "", "| CVE | sev | pkg | 現在版 | 判定 (NVD CPE) | 入口 (設定) | 影響ターゲット |", "|---|---|---|---|---|---|---|"]
     for vid, e in judged_items:
         url = f"https://nvd.nist.gov/vuln/detail/{vid}"
         lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['jrange'])} | {entrycol(e)} | {joinset(e['targets'])} |")

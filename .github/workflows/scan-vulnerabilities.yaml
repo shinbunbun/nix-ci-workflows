@@ -70,6 +70,10 @@ on:
         description: 'NOTIFY を artifact (vulnxscan-signal-*) にアップロードする (集約 job 用)'
         type: boolean
         default: true
+    secrets:
+      NVD_API_KEY:
+        description: 'NVD API key (任意)。caller から forward する。未指定でも動くが rate-limit が緩み identity 判定 (#285/#289 の NVD CPE 照会) が安定・高速化する'
+        required: false
 
 permissions:
   contents: read

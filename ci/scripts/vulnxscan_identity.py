@@ -309,7 +309,9 @@ def in_affected_range(inst_ver, bounds):
     """inst_ver が bounds (NVD CPE の versionStart/End*) の affected 範囲内なら True、
     範囲外 False、clean に比較できなければ None (= 判定不能でスキップ)。"""
     iv = _cv(inst_ver)
-    if iv is None:
+    # 単一コンポーネント版 ("1" 等) は store path のパースアーティファクトの可能性が高い
+    # (dbus→"1"/polkit→"1")。"1" < 1.12.24 のような誤該当を避けるため判定しない。
+    if iv is None or len(iv) < 2:
         return None
     si, se = bounds.get("versionStartIncluding"), bounds.get("versionStartExcluding")
     ei, ee = bounds.get("versionEndIncluding"), bounds.get("versionEndExcluding")
@@ -413,10 +415,15 @@ def detect(csv_path, pkgs_base, osv_fn=None, nvd_fn=None, nixrepo_fn=None,
                 if nvd.get("cpe"):
                     if tokens is None:
                         tokens = nix_tokens(src, nixhome_fn(pkg, pkgs_base))
+                    # version_local (= vulnxscan が見た脆弱インスタンスの版) で判定する。
+                    # closure に複数版がある (pin) 場合この版が脆弱な実体なので .version
+                    # (default attr 版) では見逃す。ただしパースアーティファクト ("1" 等) は
+                    # in_affected_range が弾く (2 要素以上の dotted 版のみ判定)。
                     judged = adjudicate_affected(pkg, inst, nvd["cpe"], tokens)
                     if judged:
                         result[vid] = {"verdict": "affected", "package": pkg,
-                                       "range": judged[0], "cpe": judged[1], "source": "nvd"}
+                                       "version": inst, "range": judged[0],
+                                       "cpe": judged[1], "source": "nvd"}
             except Exception:  # 個別 CVE の失敗で全体を落とさない (安全側=判定なし)
                 continue
     return result

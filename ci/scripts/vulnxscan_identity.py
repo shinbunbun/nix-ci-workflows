@@ -94,7 +94,7 @@ def sevf(x):
 def parse_repo(url):
     """git ホスティング URL → (host, owner, repo) 小文字。非対応 (mirror://, tarball
     ミラー, sourceforge 等) は None。GitLab API archive 形式にも対応。"""
-    if not url:
+    if not url or not isinstance(url, str):
         return None
     m = _GH_RE.match(url.strip())
     if not m:
@@ -234,13 +234,27 @@ def _nix_eval_raw(argv):
 
 
 def nix_repo(pname, pkgs_base, runner=None):
-    """nixpkgs の src.url から (host, owner, repo)。pkgs_base.<pname>.src.url を eval。
-    eval 失敗 (pname≠attr 等) や非 git ホスティングは None。"""
+    """nixpkgs の src から (host, owner, repo)。pkgs_base.<pname>.src.url (単数 URL の
+    fetchurl/fetchFromGitHub) を見て、空なら .src.urls (複数 URL の fetchurl。mirror や
+    複数ミラー指定) の最初の git URL を採る。eval 失敗 (pname≠attr 等) や非 git ホスティングは None。"""
     if not pkgs_base:
         return None
     runner = runner or _nix_eval_raw
-    out = runner(["nix", "eval", "--raw", "--no-warn-dirty", f"{pkgs_base}.{pname}.src.url"])
-    return parse_repo(out) if out else None
+    attr = f"{pkgs_base}.{pname}.src"
+    out = runner(["nix", "eval", "--raw", "--no-warn-dirty", f"{attr}.url"])
+    rt = parse_repo(out) if out else None
+    if rt:
+        return rt
+    js = runner(["nix", "eval", "--json", "--no-warn-dirty", f"{attr}.urls"])
+    if js:
+        try:
+            for u in json.loads(js):
+                rt = parse_repo(u)
+                if rt:
+                    return rt
+        except (ValueError, TypeError):
+            pass
+    return None
 
 
 def nix_homepage(pname, pkgs_base, runner=None):

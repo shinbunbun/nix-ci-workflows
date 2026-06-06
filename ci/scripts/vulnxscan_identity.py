@@ -99,6 +99,14 @@ INFRA_HOSTS = {
 }
 INFRA_OWNERS = {"cveproject", "advisories", "github"}
 
+# CVE references に出てくるが「上流プロジェクトではない」セキュリティ開示/リサーチ系 repo。
+# owner/repo 名がこれに一致するものは collision の証拠に使わない (mandiant/vulnerability-disclosures
+# を openprinting/cups の別物と誤判定する false collision を防ぐ)。collision を**減らす**方向なので
+# 本物を誤って消す FN は増えない (厳しめ=keep 寄り)。実プロジェクト (KnpLabs/snappy 等) は非該当。
+_DISCLOSURE_RE = re.compile(
+    r"disclosur|advisor|vulnerabilit|security[-_]?research|\bcve\b|[-_]cve[-_]|"
+    r"\bpoc\b|exploit|write[-_]?up|bug[-_]?bount|0day|securitylab", re.I)
+
 # identity トークンから落とす汎用語 (host TLD / ホスティング語 / mirror パス片)。
 TOKEN_STOP = {
     "", "www", "com", "org", "net", "io", "dev", "app", "apps", "github",
@@ -150,14 +158,23 @@ def _is_infra(repo_tuple):
     return host in INFRA_HOSTS or owner in INFRA_OWNERS
 
 
+def _is_disclosure(repo_tuple):
+    """repo が上流プロジェクトでなくセキュリティ開示/リサーチ系なら True (owner か repo 名で判定)。
+    GHSA advisory URL は当該プロジェクト repo を指すのでここには該当しない (= 影響を受けない)。"""
+    _, owner, repo = repo_tuple
+    return bool(_DISCLOSURE_RE.search(repo) or _DISCLOSURE_RE.search(owner))
+
+
 def _repo_from_refs(refs):
     """references (url 文字列の列) から上流 repo (host, owner, repo)。GHSA advisory URL
-    (/security/advisories/GHSA-) を最優先、無ければ非インフラ repo の多数決。無ければ None。"""
+    (/security/advisories/GHSA-) を最優先、無ければ非インフラ repo の多数決。無ければ None。
+    インフラ系 (cve.org 等) と開示/リサーチ系 repo (mandiant/vulnerability-disclosures 等) は
+    上流プロジェクトでないので除外する (false collision を防ぐ)。"""
     advisory = None
     votes = {}
     for u in refs:
         rt = parse_repo(u)
-        if not rt or _is_infra(rt):
+        if not rt or _is_infra(rt) or _is_disclosure(rt):
             continue
         if "/security/advisories/" in u and advisory is None:
             advisory = rt

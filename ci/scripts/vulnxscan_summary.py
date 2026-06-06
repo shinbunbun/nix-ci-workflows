@@ -401,19 +401,21 @@ _seen_verdict = set()  # spotcheck⊂drop で同一 row が二重昇格しない
 
 def _identity_filter(bucket):
     """bucket から verdict 付き row を抜き出す。collision は除外、affected は昇格 (judged)、
-    disputed / not_in_range は no-fix の偽陽性降格 (likely_fp、#289)。同一 vuln_id は 1 度だけ
-    処理し、残り (判定なし) はそのまま返す。"""
+    disputed / not_in_range は no-fix の偽陽性降格 (likely_fp、#289)。verdict=nofix_cpe は
+    分類を動かさず _identity を注記するだけ (no-fix 表の NVD CPE 判定列、#289 表示拡張)。
+    同一 vuln_id は 1 度だけ処理し、残り (判定なし/注記のみ) はそのまま返す。"""
     dest_of = {"collision": collision, "affected": judged,
                "disputed": likely_fp, "not_in_range": likely_fp}
     keep = []
     for r in bucket:
         vid = r.get("vuln_id", "")
         info = identity_map.get(vid)
+        if info:
+            r["_identity"] = info  # 移動有無に関わらず注記 (nofix_cpe は keep 側で表示に使う)
         dest = dest_of.get((info or {}).get("verdict"))
         if dest is not None:
             if vid not in _seen_verdict:
                 _seen_verdict.add(vid)
-                r["_identity"] = info
                 dest.append(r)
             # 既処理 (別 bucket で昇格/降格/除外済) の重複はこの bucket から取り除くだけ
         else:
@@ -490,6 +492,8 @@ print(
     "> **凡例** — NOTIFY = latest nixpkgs でも残る要対処 CVE。"
     "🔧 **fixable**: nixpkgs に修正版あり、pin 解消/更新で直る（パッチ版を明記）。"
     "🛑 **no-fix**: 修正版が存在しない → Remove/Replace/Mitigate/受容(whitelist)/待ち。"
+    " no-fix の **判定 (NVD CPE)** 列=該当確定 (NVD 版範囲内=本物 TP) / 上限なし (NVD に修正版データ無し) /"
+    " 日付上限 (修正が git-master commit で release 未反映=要 backport 確認・FP 候補) / —(NVD 未照会・vendor 不一致)。"
     " ✅ **judged-affected**=repology が判定不能/非該当としたが NVD CPE の版範囲で該当確定 "
     "(UNKNOWN/spot-check/repology 非該当 DROP から NOTIFY へ昇格、vendor 一致 + clean 版のみの保守判定)。"
     " ❓ **UNKNOWN**=repology にデータ無し/版解析失敗で判定不能 (safe ではない、要確認)。"
@@ -563,12 +567,32 @@ def _trk(r):
     return r.get("_tracker", "") or "—"
 
 
-# 🛑 no-fix。tracker 有効時は nixpkgs 列で権威ステータスを併記 (#289)。
+def _nofix_cpe(r):
+    """no-fix の NVD CPE 判定列 (#289 表示拡張)。identity の nofix_cpe 注記から、
+    NVD で該当確定 (本物 TP) / 上限なし・日付上限 (修正版が semver で無い=要確認・FP 候補) を区別。
+    identity 未指定/未照会/vendor 不一致は — 。"""
+    info = r.get("_identity") or {}
+    if info.get("verdict") != "nofix_cpe":
+        return "—"
+    kind, detail = info.get("kind"), info.get("detail", "")
+    if kind == "confirmed":
+        return f"該当確定 {detail}".strip()
+    if kind == "date":
+        return f"日付上限 {detail}".strip()
+    if kind == "nobound":
+        return "上限なし"
+    return "—"
+
+
+# 🛑 no-fix。tracker 有効時は nixpkgs 列で権威ステータスを併記。identity 有効時は NVD CPE 判定列で
+# 該当確定 TP と repology 頼み (上限なし/日付上限) の FP 候補を区別する (#289)。
 table(
     nofix,
-    ["CVE", "sev", "pkg", "現在版"] + (["nixpkgs"] if tracker_loaded else []) + ["入口 (設定)"],
+    ["CVE", "sev", "pkg", "現在版"] + (["nixpkgs"] if tracker_loaded else [])
+    + (["判定 (NVD CPE)"] if identity_loaded else []) + ["入口 (設定)"],
     lambda r: [r.get("vuln_id", ""), r.get("severity", ""), r.get("package", ""), r.get("version_local", "")]
     + ([_trk(r)] if tracker_loaded else [])
+    + ([_nofix_cpe(r)] if identity_loaded else [])
     + [origin(r.get("package", ""), r.get("version_local", ""))],
     "🛑 NOTIFY / no-fix — 修正版なし (mitigation/受容/待ち)",
 )

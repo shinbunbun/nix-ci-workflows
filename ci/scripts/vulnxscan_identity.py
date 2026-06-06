@@ -415,6 +415,31 @@ def adjudicate_not_affected(pname, inst_ver, cpe_list, tokens):
     return (rng, f"{vp[0]}:{vp[1]}")
 
 
+def classify_nofix_cpe(pname, inst_ver, cpe_list, tokens):
+    """no-fix のまま据え置く項目の NVD CPE 判定を表示用に分類 (分類は動かさない、#289 表示拡張)。
+    not_in_range (全 range が clean に範囲外) で降格しなかった = 該当確定/上限なし/日付上限 の
+    いずれか。vendor+product 一致の range だけ見て (厳格 vendor ゲート):
+      ('confirmed', 'vendor:product range')  : in_affected_range True = NVD CPE で該当確定 (本物 TP)
+      ('date',      'k=v,...')               : 上限が semver でない (日付等) = git-master 修正で
+                                               release 未反映の疑い (要 backport 確認・FP 候補)
+      ('nobound',   '')                      : 一致 range はあるが上限なし (versionStart のみ)
+    一致 range が無い (vendor 不一致/未照会) は None (表示 '—')。"""
+    target = _norm(pname)
+    matched = [(v, p, b) for v, p, b in cpe_list if _norm(p) == target and v in tokens]
+    if not matched:
+        return None
+    for v, p, b in matched:
+        if in_affected_range(inst_ver, b) is True:
+            rng = ",".join(f"{k}={x}" for k, x in b.items())
+            return ("confirmed", f"{v}:{p} {rng}")
+    _UPPER = ("versionEndIncluding", "versionEndExcluding")
+    for v, p, b in matched:
+        # 上限キーを持ち、その値が clean semver でない (日付 2025-09-16 等) = date 上限
+        if any(k in b for k in _UPPER) and any(_cv(b[k]) is None for k in _UPPER if k in b):
+            return ("date", ",".join(f"{k}={x}" for k, x in b.items()))
+    return ("nobound", "")
+
+
 # ----------------------------- 候補収集・統合判定 -----------------------------
 def collect_candidates(csv_path):
     """判定対象の {pname: [(vuln_id, version_local, classify), ...]}。
@@ -506,6 +531,14 @@ def detect(csv_path, pkgs_base, osv_fn=None, nvd_fn=None, nixrepo_fn=None,
                             result[vid] = {"verdict": "not_in_range", "package": pkg,
                                            "version": inst, "range": nia[0],
                                            "cpe": nia[1], "source": "nvd"}
+                            continue
+                        # (c) 降格しない (該当確定/上限なし/日付上限) なら NVD CPE 判定を
+                        # annotation として記録 (分類は no-fix のまま、表示用。lever 2 で取れない
+                        # FP 候補=上限なし/日付上限と、NVD 該当確定 TP を no-fix 表で区別する)。
+                        cn = classify_nofix_cpe(pkg, inst, nvd["cpe"], tokens)
+                        if cn:
+                            result[vid] = {"verdict": "nofix_cpe", "package": pkg,
+                                           "kind": cn[0], "detail": cn[1], "source": "nvd"}
                     continue
                 if nvd.get("cpe"):
                     if tokens is None:
@@ -540,7 +573,8 @@ def main(argv):
         return sum(1 for x in result.values() if x.get("verdict") == v)
     sys.stderr.write(
         f"identity: 名前衝突 {_cnt('collision')} 件 / 該当確定 (昇格) {_cnt('affected')} 件 / "
-        f"no-fix 降格 disputed {_cnt('disputed')} 件・範囲外 {_cnt('not_in_range')} 件\n")
+        f"no-fix 降格 disputed {_cnt('disputed')} 件・範囲外 {_cnt('not_in_range')} 件 / "
+        f"no-fix NVD CPE 注記 {_cnt('nofix_cpe')} 件\n")
     return 0
 
 

@@ -44,7 +44,7 @@ def short_target(t):
 def _new_entry():
     return {"severity": "", "packages": set(), "classifies": set(), "targets": set(),
             "cur": set(), "patch": set(), "entry": set(), "base_n": 0, "tracker": "",
-            "jrange": set(), "fpreason": set()}
+            "jrange": set(), "fpreason": set(), "nvdcpe": set()}
 
 
 def _accumulate(agg, target, fdg):
@@ -75,6 +75,12 @@ def _accumulate(agg, target, fdg):
             e["fpreason"].add(f"NVD tag: {ident.get('reason', '')}{tail}")
         elif v == "not_in_range":  # likely-FP の CPE 版範囲外降格理由 (#289)
             e["fpreason"].add(f"版範囲外 {ident.get('cpe', '')} {ident.get('range', '')}".strip())
+        elif v == "nofix_cpe":  # no-fix 据え置きの NVD CPE 判定注記 (#289 表示拡張)
+            kind, detail = ident.get("kind"), ident.get("detail", "")
+            label = ({"confirmed": f"該当確定 {detail}", "date": f"日付上限 {detail}",
+                      "nobound": "上限なし"}.get(kind) or "").strip()
+            if label:
+                e["nvdcpe"].add(label)
     if fdg.get("version_local"):
         e["cur"].add(fdg.get("version_local"))
     if fdg.get("version_nixpkgs"):
@@ -127,6 +133,8 @@ spot_items = _sort_items(agg_spot)
 reclass_items = _sort_items(agg_reclass)
 likely_items = _sort_items(agg_likely)
 tracker_on = bool(reclass_items) or any(e["tracker"] for _, e in items + unknown_items)
+# no-fix の NVD CPE 判定列は注記が 1 件でもある時だけ出す (全部 — なら列を増やさない)。
+nofixcpe_on = any(e["nvdcpe"] for _, e in nofix)
 
 
 def joinset(s):
@@ -151,6 +159,11 @@ def fpreasoncol(e):
     return ",".join(sorted(x for x in e["fpreason"] if x)) or "—"
 
 
+def nvdcpecol(e):
+    """no-fix の NVD CPE 判定列 (#289)。該当確定=本物 TP / 上限なし・日付上限=要確認 FP 候補。"""
+    return ",".join(sorted(x for x in e["nvdcpe"] if x)) or "—"
+
+
 def _trk_h():
     """tracker 有効時のみ nixpkgs 列ヘッダ片を返す (無効時は空)。"""
     return "nixpkgs | " if tracker_on else ""
@@ -169,6 +182,8 @@ lines = [
     "",
     "> **凡例** — 🔧 **fixable**: nixpkgs に修正版あり、pin 解消/更新で直る（パッチ版明記）。"
     " 🛑 **no-fix**: 修正版が存在しない → Remove/Replace/Mitigate/受容(whitelist.csv)/upstream 待ち。"
+    " no-fix の **判定 (NVD CPE)** 列=該当確定(NVD 版範囲内=本物 TP)/上限なし(NVD に修正版データ無し)/"
+    "日付上限(修正が git-master commit で release 未反映=要 backport 確認・FP 候補)/—(NVD 未照会・vendor 不一致)。"
     " ✅ **judged-affected**: repology が判定不能/非該当としたが NVD CPE の版範囲で該当確定し "
     "UNKNOWN/spot-check/非該当 DROP から昇格 (vendor 一致 + clean 版のみの保守判定)。"
     " ❓ **UNKNOWN**: repology にデータ無し/版解析失敗で判定不能 (safe ではない、要確認)。"
@@ -203,10 +218,13 @@ if judged_items:
         lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {joinset(e['jrange'])} | {entrycol(e)} | {joinset(e['targets'])} |")
     lines.append("")
 if nofix:
-    lines += ["### 🛑 no-fix — 修正版なし (mitigation/受容/待ち)", "", f"| CVE | sev | pkg | 現在版 | {_trk_h()}入口 (設定) | 影響ターゲット |", "|---|---|---|---|" + ("---|" if tracker_on else "") + "---|---|"]
+    _nch = "判定 (NVD CPE) | " if nofixcpe_on else ""
+    _nch_sep = "---|" if nofixcpe_on else ""
+    lines += ["### 🛑 no-fix — 修正版なし (mitigation/受容/待ち)", "", f"| CVE | sev | pkg | 現在版 | {_trk_h()}{_nch}入口 (設定) | 影響ターゲット |", "|---|---|---|---|" + ("---|" if tracker_on else "") + _nch_sep + "---|---|"]
     for vid, e in nofix:
         url = f"https://nvd.nist.gov/vuln/detail/{vid}"
-        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {_trk_c(e)}{entrycol(e)} | {joinset(e['targets'])} |")
+        _nc = f"{nvdcpecol(e)} | " if nofixcpe_on else ""
+        lines.append(f"| [{vid}]({url}) | {e['severity']} | {joinset(e['packages'])} | {joinset(e['cur'])} | {_trk_c(e)}{_nc}{entrycol(e)} | {joinset(e['targets'])} |")
     lines.append("")
 if unknown_items:
     lines += ["### ❓ UNKNOWN — 判定不能 (要確認・safe ではない)", "", f"| CVE | sev | pkg | 現在版 | 理由 | {_trk_h()}入口 (設定) | 影響ターゲット |", "|---|---|---|---|---|" + ("---|" if tracker_on else "") + "---|---|"]

@@ -378,6 +378,24 @@ def _norm(s):
     return re.sub(r"[-_]", "", (s or "").lower())
 
 
+# NVD は vendor が無い OSS に `<product>_project` 等の慣習名を付ける (libsndfile_project,
+# packagekit_project 等)。src.url owner トークン (libsndfile) と一致しないので vendor ゲートで
+# 弾かれる。これらサフィックスを剥がした形でも照合する。
+_VENDOR_SUFFIX_RE = re.compile(
+    r"_(project|projects|team|foundation|group|inc|llc|org|software|dev|labs)$")
+
+
+def _vendor_in_tokens(vendor, tokens):
+    """CPE vendor が nix identity tokens に含まれるか。`<x>_project` 等のサフィックスを
+    剥がした形でも照合し NVD の命名慣習を吸収する (libsndfile_project→libsndfile)。
+    剥がした語が tokens にある時のみ True なので、無関係な vendor (intel/plotly 等) は
+    従来どおり弾かれる = 誤適用 (FP) は増やさない。"""
+    if vendor in tokens:
+        return True
+    stripped = _VENDOR_SUFFIX_RE.sub("", vendor)
+    return stripped != vendor and stripped in tokens
+
+
 def adjudicate_affected(pname, inst_ver, cpe_list, tokens):
     """NVD CPE 群から「該当確定」を判定。product≈pname かつ vendor∈tokens の range のみ使う。
     in_range True が 1 つでもあれば (range 文字列, 'vendor:product') を返す。無ければ None。"""
@@ -385,7 +403,7 @@ def adjudicate_affected(pname, inst_ver, cpe_list, tokens):
     for vendor, product, bounds in cpe_list:
         if _norm(product) != target:
             continue
-        if vendor not in tokens:  # vendor ゲート: intel:openmp / plotly:dash 等の誤適用を防ぐ
+        if not _vendor_in_tokens(vendor, tokens):  # vendor ゲート: intel:openmp / plotly:dash 等の誤適用を防ぐ
             continue
         if in_affected_range(inst_ver, bounds) is True:
             rng = ",".join(f"{k}={v}" for k, v in bounds.items())
@@ -403,7 +421,7 @@ def adjudicate_not_affected(pname, inst_ver, cpe_list, tokens):
     for vendor, product, bounds in cpe_list:
         if _norm(product) != target:
             continue
-        if vendor not in tokens:  # vendor ゲート: affected と同じ誤適用防止
+        if not _vendor_in_tokens(vendor, tokens):  # vendor ゲート: affected と同じ誤適用防止
             continue
         matched.append((vendor, product, bounds, in_affected_range(inst_ver, bounds)))
     if not matched:
@@ -418,14 +436,14 @@ def adjudicate_not_affected(pname, inst_ver, cpe_list, tokens):
 def classify_nofix_cpe(pname, inst_ver, cpe_list, tokens):
     """no-fix のまま据え置く項目の NVD CPE 判定を表示用に分類 (分類は動かさない、#289 表示拡張)。
     not_in_range (全 range が clean に範囲外) で降格しなかった = 該当確定/上限なし/日付上限 の
-    いずれか。vendor+product 一致の range だけ見て (厳格 vendor ゲート):
+    いずれか。vendor+product 一致の range だけ見て (vendor ゲート、`_project` 等のサフィックス正規化込み):
       ('confirmed', 'vendor:product range')  : in_affected_range True = NVD CPE で該当確定 (本物 TP)
       ('date',      'k=v,...')               : 上限が semver でない (日付等) = git-master 修正で
                                                release 未反映の疑い (要 backport 確認・FP 候補)
       ('nobound',   '')                      : 一致 range はあるが上限なし (versionStart のみ)
     一致 range が無い (vendor 不一致/未照会) は None (表示 '—')。"""
     target = _norm(pname)
-    matched = [(v, p, b) for v, p, b in cpe_list if _norm(p) == target and v in tokens]
+    matched = [(v, p, b) for v, p, b in cpe_list if _norm(p) == target and _vendor_in_tokens(v, tokens)]
     if not matched:
         return None
     for v, p, b in matched:

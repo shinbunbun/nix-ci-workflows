@@ -180,22 +180,23 @@ lines = [
     "",
     f"自動生成 (最終更新: {ts})。vulnxscan の **NOTIFY** (latest nixpkgs でも残る = 要対処) を集約。",
     "",
-    "> **凡例** — 🔧 **fixable**: nixpkgs に修正版あり、pin 解消/更新で直る（パッチ版明記）。"
-    " 🛑 **no-fix**: 修正版が存在しない → Remove/Replace/Mitigate/受容(whitelist.csv)/upstream 待ち。"
-    " no-fix の **判定 (NVD CPE)** 列=該当確定(NVD 版範囲内=本物 TP)/上限なし(NVD に修正版データ無し)/"
-    "日付上限(修正が git-master commit で release 未反映=要 backport 確認・FP 候補)/—(NVD 未照会・vendor 不一致)。"
-    " ✅ **judged-affected**: repology が判定不能/非該当としたが NVD CPE の版範囲で該当確定し "
-    "UNKNOWN/spot-check/非該当 DROP から昇格 (vendor 一致 + clean 版のみの保守判定)。"
-    " ❓ **UNKNOWN**: repology にデータ無し/版解析失敗で判定不能 (safe ではない、要確認)。"
-    " 🔁 **reclassified**: Nixpkgs Security Tracker が notaffected/notforus と判断 "
-    "(backport patch/対象外) し no-fix/UNKNOWN から降格した要確認・whitelist 候補。"
-    " 🟢 **likely-FP**: no-fix のうち NVD の権威データ (cveTags=disputed 等 / 版範囲外) で"
-    "偽陽性疑いと判定し降格した要確認・whitelist 候補 (#289)。"
-    " **nixpkgs** 列=Tracker の権威ステータス (affected/wontfix/notaffected/notforus、— は未登録)。"
-    " 🔍 **spot-check**: repology は非該当判定だが high-sev のため誤判定保険として併載 (DROP 維持)。"
-    " auto-update で直る分(INFO)と誤検知(DROP)は除外済。詳細分類は各 run の job summary 参照。"
-    " 入口(設定)=その版を closure に入れた宣言 (systemPackages/home.packages) とソースファイル"
-    " (そこを更新/削除/service 無効化で解消)。『基盤依存』=多数参照の基盤ライブラリで config 単独不可、nixpkgs 更新待ち。",
+    "> **凡例**\n>\n"
+    "> - 🔧 **fixable**: nixpkgs に修正版あり、pin 解消/更新で直る（パッチ版明記）\n"
+    "> - 🛑 **no-fix**: 修正版が存在しない → Remove/Replace/Mitigate/受容(whitelist.csv)/upstream 待ち。"
+    "**判定 (NVD CPE)** 列=該当確定(NVD 版範囲内=本物 TP)/上限なし(NVD に修正版データ無し)/"
+    "日付上限(修正が git-master commit で release 未反映=要 backport 確認・FP 候補)/—(NVD 未照会・vendor 不一致)\n"
+    "> - ✅ **judged-affected**: repology が判定不能/非該当としたが NVD CPE の版範囲で該当確定し "
+    "UNKNOWN/spot-check/非該当 DROP から昇格 (vendor 一致 + clean 版のみの保守判定)\n"
+    "> - ❓ **UNKNOWN**: repology にデータ無し/版解析失敗で判定不能 (safe ではない、要確認)\n"
+    "> - 🔁 **reclassified**: Nixpkgs Security Tracker が notaffected/notforus と判断 "
+    "(backport patch/対象外) し no-fix/UNKNOWN から降格した要確認・whitelist 候補\n"
+    "> - 🟢 **likely-FP**: no-fix のうち NVD の権威データ (cveTags=disputed 等 / 版範囲外) で"
+    "偽陽性疑いと判定し降格した要確認・whitelist 候補 (#289)\n"
+    "> - **nixpkgs** 列=Tracker の権威ステータス (affected/wontfix/notaffected/notforus、— は未登録)\n"
+    "> - 🔍 **spot-check**: repology は非該当判定だが high-sev のため誤判定保険として併載 (DROP 維持)。"
+    "auto-update で直る分(INFO)と誤検知(DROP)は除外済。詳細分類は各 run の job summary 参照\n"
+    "> - 入口(設定)=その版を closure に入れた宣言 (systemPackages/home.packages) とソースファイル"
+    " (そこを更新/削除/service 無効化で解消)。『基盤依存』=多数参照の基盤ライブラリで config 単独不可、nixpkgs 更新待ち",
     "",
     f"**NOTIFY: {len(items)} CVE** (🔧 fixable {len(fixable)} / 🛑 no-fix {len(nofix)})"
     + (f" ・ ✅ judged-affected {len(judged_items)}" if judged_items else "")

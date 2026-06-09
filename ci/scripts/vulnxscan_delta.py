@@ -28,9 +28,13 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-head_dir = sys.argv[1] if len(sys.argv) > 1 else "head-signals"
-base_dir = sys.argv[2] if len(sys.argv) > 2 else "baseline-signals"
-pr_number = sys.argv[3] if len(sys.argv) > 3 else os.environ.get("GITHUB_PR_NUMBER", "")
+# --gate: introduced > 0 のとき exit 1 を返し、required status check を fail させて
+# auto-merge をブロックする (#284 blocking モード)。フラグは positional 引数より先に除去する。
+gate_mode = "--gate" in sys.argv[1:]
+_pos = [a for a in sys.argv[1:] if a != "--gate"]
+head_dir = _pos[0] if len(_pos) > 0 else "head-signals"
+base_dir = _pos[1] if len(_pos) > 1 else "baseline-signals"
+pr_number = _pos[2] if len(_pos) > 2 else os.environ.get("GITHUB_PR_NUMBER", "")
 MARKER = "<!-- vulnxscan-delta -->"
 
 
@@ -148,7 +152,8 @@ ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M %Z")
 lines = [
     MARKER,
     "",
-    "## 🔬 vulnxscan delta — この PR が変える脆弱性 (report-only)",
+    "## 🔬 vulnxscan delta — この PR が変える脆弱性"
+    + ("（**新規流入で auto-merge ブロック**）" if gate_mode else "（report-only）"),
     "",
     f"自動生成 (最終更新: {ts})。base = **main の最新スキャン**、head = この PR のクロージャ。"
     " 要対処集合 (NOTIFY + judged-affected) の差分のみ。既存の CVE は集約 Issue #283 を参照。",
@@ -167,6 +172,13 @@ elif not introduced and not resolved:
 else:
     lines.append(f"**🆕 新規流入 {len(introduced)} ・ ✅ 解消 {len(resolved)}**")
     lines.append("")
+    if gate_mode and introduced:
+        lines += [
+            "> ⛔ **この PR は新規の脆弱性を持ち込むため auto-merge をブロックしました。**",
+            "> 対応: 流入元の更新を見送る / パッケージを置換・削除する / "
+            "意図的に受容する場合は理由付きで `whitelist.csv` に追記する (再スキャンで gate 解除)。",
+            "",
+        ]
     if introduced:
         lines += ["### 🆕 この PR が新規流入させる CVE", ""]
         lines += render_table(introduced)
@@ -192,10 +204,16 @@ if head_missing:
 
 lines += [
     "",
-    "> report-only。確定FP/リスク受容は `whitelist.csv` に追記すると以降抑制されます。"
-    " 詳細分類は各 target の job summary 参照。",
+    ("> 確定FP/リスク受容は `whitelist.csv` に追記すると introduced から外れ gate が解除されます。"
+     if gate_mode else
+     "> report-only。確定FP/リスク受容は `whitelist.csv` に追記すると以降抑制されます。")
+    + " 詳細分類は各 target の job summary 参照。",
 ]
 body = "\n".join(lines)
+
+# gate モード時は introduced があれば最終的に exit 1 で required check を fail させる
+# (auto-merge ブロック)。コメント投稿の成否とは独立に評価する。
+gate_fail = gate_mode and bool(introduced)
 
 repo = os.environ.get("GITHUB_REPOSITORY")
 token = os.environ.get("GITHUB_TOKEN")
@@ -204,7 +222,7 @@ api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
 if not token or not repo or not pr_number:
     print("[dry-run] GITHUB_TOKEN / GITHUB_REPOSITORY / PR 番号 のいずれか未設定。body:\n")
     print(body)
-    sys.exit(0)
+    sys.exit(1 if gate_fail else 0)
 
 
 def req(method, path, payload=None):
@@ -229,12 +247,12 @@ def ok(status):
 
 
 # PR コメント (= issue コメント) を MARKER で探して upsert。再 push でスパムしない。
-# 一覧取得に失敗したら重複コメントを避けるため中断 (report-only なので非 0 終了でも
-# blocking しない設定だが、念のため明示する)。
+# 一覧取得に失敗したらコメントはスキップするが、gate モードで introduced があれば
+# 末尾と同じく exit 1 で block する (コメント投稿の成否と gate 判定は独立)。
 st, comments = req("GET", f"/repos/{repo}/issues/{pr_number}/comments?per_page=100")
 if st != 200 or not isinstance(comments, list):
     print(f"::warning::PR #{pr_number} のコメント一覧取得に失敗 (status={st})。delta コメントをスキップ。")
-    sys.exit(0)
+    sys.exit(1 if gate_fail else 0)
 
 existing = next((c for c in comments if MARKER in (c.get("body") or "")), None)
 summary = f"introduced {len(introduced)} / resolved {len(resolved)}"
@@ -250,3 +268,9 @@ else:
         print(f"created delta comment on PR #{pr_number} ({summary})")
     else:
         print(f"::warning::delta コメント作成に失敗 (status={st})")
+
+# gate モード: 新規流入があれば exit 1 で required check を fail → auto-merge をブロック。
+if gate_fail:
+    print(f"::error::この PR は新規脆弱性 {len(introduced)} 件を持ち込むため gate を fail させます "
+          f"(auto-merge ブロック)。whitelist.csv で受容するか流入元を見直してください。")
+    sys.exit(1)

@@ -62,10 +62,17 @@ jobs:
       needs-sops: true
       needs-wireguard: false    # WireGuard不要なら公開URL経由でAttic push
       use-attic: true           # Attic連携を無効にするにはfalse
+      report-closure-diff: ${{ github.ref_name != 'main' }}  # PRに closure 差分を投稿
+      closure-diff-base-ref: main                            # 差分の基準ref（既定 main）
     secrets:
       ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
       SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
 ```
+
+`report-closure-diff: true` のとき、ビルドした closure を `closure-diff-base-ref`
+（既定 `main`）の同一ターゲット closure と `nix store diff-closures` で比較し、
+対象ブランチの open PR に**ターゲット別 sticky comment**として投稿する。`pull-requests: write`
+権限と `git fetch` 可能な checkout が前提。失敗してもジョブは継続する（非致命）。
 
 ### build-packages
 

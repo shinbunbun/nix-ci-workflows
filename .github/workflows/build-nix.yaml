@@ -5,6 +5,12 @@
 # Atticキャッシュ連携はオプション（use-attic で制御）。
 # SOPS秘密鍵のセットアップもオプション。
 #
+# report-closure-diff を有効にすると、ビルドした closure を base ref
+# (closure-diff-base-ref, 既定 main) の同一ターゲット closure と
+# `nix store diff-closures` で比較し、対象ブランチの open PR に
+# ターゲット別 sticky comment として結果を投稿する（flake.lock 更新 PR で
+# 実際に上がったパッケージバージョンを可視化する用途）。非致命。
+#
 # 使用方法:
 #   uses: shinbunbun/nix-ci-workflows/.github/workflows/build-nix.yaml@main
 #   with:
@@ -71,6 +77,16 @@ on:
         required: false
         type: string
         default: ''
+      report-closure-diff:
+        description: 'Whether to compute `nix store diff-closures` vs a base ref and post it as a per-target sticky PR comment'
+        required: false
+        type: boolean
+        default: false
+      closure-diff-base-ref:
+        description: 'Git ref to diff the built closure against (typically the PR base branch)'
+        required: false
+        type: string
+        default: 'main'
     secrets:
       AUTHENTIK_CLIENT_ID:
         required: false
@@ -84,6 +100,7 @@ on:
 permissions:
   id-token: write
   contents: read
+  pull-requests: write
 
 jobs:
   build:
@@ -159,6 +176,64 @@ jobs:
             --show-trace \
             --out-link "result-${{ inputs.result-name }}" \
             "${args[@]}"
+
+      - name: Compute and post closure diff
+        if: inputs.report-closure-diff
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          BASE_REF: ${{ inputs.closure-diff-base-ref }}
+          RESULT_NAME: ${{ inputs.result-name }}
+          BUILD_TARGET: ${{ inputs.build-target }}
+        run: |
+          set -euo pipefail
+
+          # base ref (= 更新前) を取得し、その時点のツリーを展開
+          git fetch --depth=1 origin "$BASE_REF"
+          BASE_REV="$(git rev-parse FETCH_HEAD)"
+          BASE_SRC="$(mktemp -d)"
+          git archive FETCH_HEAD | tar -x -C "$BASE_SRC"
+
+          # base の closure を取得。base は push 時に Attic へ送られているため
+          # 実質 substitute（ダウンロード）のみで済む想定。
+          # path: flakeref で git を介さずディスク上の flake.lock を直接使う。
+          # --max-jobs 0 でローカルビルドを禁止し、cache miss 時は（フルビルドを
+          # 暴発させず）この step を失敗させて continue-on-error でスキップさせる。
+          ATTR="${BUILD_TARGET#.#}"
+          nix build "path:${BASE_SRC}#${ATTR}" \
+            --max-jobs 0 \
+            --out-link "result-${RESULT_NAME}-base"
+
+          # 更新前 → 更新後 の差分を計算
+          DIFF="$(nix store diff-closures "result-${RESULT_NAME}-base" "result-${RESULT_NAME}")"
+          if [ -z "$DIFF" ]; then
+            DIFF="(no package version changes in the runtime closure)"
+          fi
+
+          # 対象ブランチの open PR を特定（push トリガなので head から逆引き）
+          PR_NUMBER="$(gh pr list --head "$HEAD_BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No open PR for branch '$HEAD_BRANCH'; skipping comment."
+            echo "$DIFF"
+            exit 0
+          fi
+
+          # ターゲット別 marker で sticky comment（再実行時は更新、無ければ新規）
+          MARKER="<!-- closure-diff:${RESULT_NAME} -->"
+          # printf のフォーマット内のバッククォートは markdown のコード装飾用リテラル
+          # shellcheck disable=SC2016
+          BODY="$(printf '%s\n## 📦 Closure diff: `%s`\n\nBase: `%s` (`%s`)\n\n```\n%s\n```\n' \
+            "$MARKER" "$RESULT_NAME" "$BASE_REF" "${BASE_REV:0:12}" "$DIFF")"
+
+          COMMENT_ID="$(gh api "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" --paginate \
+            --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty")"
+          if [ -n "$COMMENT_ID" ]; then
+            gh api -X PATCH "repos/${GH_REPO}/issues/comments/${COMMENT_ID}" -f body="$BODY"
+          else
+            gh api -X POST "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" -f body="$BODY"
+          fi
 
       - name: Configure and push to Attic cache
         if: inputs.use-attic && inputs.push-to-cache && github.event_name == 'push'

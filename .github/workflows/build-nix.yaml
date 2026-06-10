@@ -97,10 +97,13 @@ on:
       SOPS_AGE_KEY:
         required: false
 
-permissions:
-  id-token: write
-  contents: read
-  pull-requests: write
+# permissions はあえて宣言せず caller から継承する。
+# reusable が caller より広い permissions を宣言すると、それを付与していない caller は
+# startup_failure になる (例: pull-requests: write を無条件宣言すると build-nix を呼ぶ
+# 全 caller の CI が起動失敗)。caller 側で必要な権限を付与すること:
+#   - 必須: id-token: write (Attic OIDC), contents: read
+#   - report-closure-diff: true を使う場合のみ: pull-requests: write (PR コメント投稿用)
+# closure diff の step は continue-on-error なので、権限不足でも build 自体は失敗しない。
 
 jobs:
   build:

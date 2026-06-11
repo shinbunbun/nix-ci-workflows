@@ -209,8 +209,13 @@ jobs:
             --max-jobs 0 \
             --out-link "result-${RESULT_NAME}-base"
 
-          # 更新前 → 更新後 の差分を計算
-          DIFF="$(nix store diff-closures "result-${RESULT_NAME}-base" "result-${RESULT_NAME}")"
+          # 更新前 → 更新後 の差分を計算。
+          # diff-closures の引数は installable 扱いなので、out-link 名をそのまま渡すと
+          # flakeref と誤解釈される (error: cannot find flake 'flake:result-...')。
+          # 実 store パスに解決してから渡す。
+          DIFF="$(nix store diff-closures \
+            "$(readlink -f "result-${RESULT_NAME}-base")" \
+            "$(readlink -f "result-${RESULT_NAME}")")"
           if [ -z "$DIFF" ]; then
             DIFF="(no package version changes in the runtime closure)"
           fi

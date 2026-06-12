@@ -156,10 +156,6 @@ def test_vendor_in_tokens_direct_and_suffix():
 
 
 # ----------------------------- adjudicate_affected / not_affected -----------------------------
-def _tokens():
-    return {"taglib", "taglib"}
-
-
 def test_adjudicate_affected_promotes_in_range():
     cpe = [("taglib", "taglib", {"versionEndExcluding": "2.0"})]
     res = ident.adjudicate_affected("taglib", "1.12", cpe, {"taglib"})

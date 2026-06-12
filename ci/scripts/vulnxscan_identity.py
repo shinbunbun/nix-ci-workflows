@@ -64,6 +64,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from vulnxscan_common import UNKNOWN_CLASSIFY, sevf
+
 CVE_RE = re.compile(r"^CVE-\d{4}-\d+$")
 TIMEOUT = 20  # 秒
 UA = {"User-Agent": "vulnxscan-identity (+https://github.com/shinbunbun/nix-ci-workflows)"}
@@ -73,8 +75,7 @@ NVD_KEY = os.environ.get("NVD_API_KEY", "").strip()
 # NVD は API key 無しで 5 req/30s。429/403 を避けるため呼び出し間隔を空ける (key ありは短縮)。
 NVD_DELAY = float(os.environ.get("NVD_DELAY", "1.5" if NVD_KEY else "6.5"))
 
-# summary.py の UNKNOWN_CLASSIFY と一致させること。
-UNKNOWN_CLASSIFY = {"err_missing_repology_version", "err_invalid_version"}
+# UNKNOWN_CLASSIFY は vulnxscan_common から import (summary.py と共有)。
 SPOTCHECK_CLASSIFY = "err_not_vulnerable_based_on_repology"
 # no-fix (修正版なし) の偽陽性を権威ソースで降格する対象 classify (#289)。
 NOFIX_CLASSIFY = "fix_not_available"
@@ -118,13 +119,6 @@ TOKEN_STOP = {
 _GH_RE = re.compile(r"^https?://(github\.com|gitlab\.[^/]+)/(.+)$", re.I)
 _API_PROJ_RE = re.compile(r"^api/v4/projects/([^/]+)/", re.I)
 _CLEAN_VER_RE = re.compile(r"^\d+(\.\d+)*$")
-
-
-def sevf(x):
-    try:
-        return float(x)
-    except (TypeError, ValueError):
-        return 0.0
 
 
 # ----------------------------- repo 抽出・比較 -----------------------------

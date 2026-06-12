@@ -9,7 +9,6 @@ Nix CI/CD用の再利用可能なGitHub Actionsワークフロー集。
 | `format-check.yaml` | `nix fmt -- --fail-on-change` によるフォーマットチェック |
 | `discover-targets.yaml` | Flakeターゲット自動検出（NixOS/Darwin設定名、パッケージリスト） |
 | `build-nix.yaml` | 単一Nixターゲットのビルド + Atticキャッシュpush（オプション） |
-| `build-packages.yaml` | パッケージリストの一括ビルド + Atticキャッシュpush（オプション） |
 | `deploy-nix.yaml` | deploy-rsによるNixOSデプロイ（WireGuard VPN経由） |
 | `auto-update-flake.yaml` | `nix flake update` + PR自動作成・自動マージ |
 
@@ -73,20 +72,6 @@ jobs:
 （既定 `main`）の同一ターゲット closure と `nix store diff-closures` で比較し、
 対象ブランチの open PR に**ターゲット別 sticky comment**として投稿する。`pull-requests: write`
 権限と `git fetch` 可能な checkout が前提。失敗してもジョブは継続する（非致命）。
-
-### build-packages
-
-```yaml
-jobs:
-  build-packages:
-    uses: shinbunbun/nix-ci-workflows/.github/workflows/build-packages.yaml@main
-    with:
-      runner: ubuntu-latest
-      system: x86_64-linux
-      packages: '["attic","deploy-rs"]'
-    secrets:
-      ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
-```
 
 ### deploy-nix
 

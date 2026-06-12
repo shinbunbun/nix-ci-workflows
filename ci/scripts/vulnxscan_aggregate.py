@@ -17,11 +17,9 @@ import json
 import os
 import re
 import sys
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 
-from vulnxscan_common import sevf, short_target
+from vulnxscan_common import make_requester, ok, sevf, short_target
 
 LABEL = "vulnxscan"
 TITLE = "🔎 vulnxscan: 脆弱性スキャン結果 (自動)"
@@ -275,24 +273,7 @@ def main(argv):
         print(body)
         return 0
 
-    def req(method, path, payload=None):
-        url = path if path.startswith("http") else f"{api}{path}"
-        data = json.dumps(payload).encode() if payload is not None else None
-        r = urllib.request.Request(url, data=data, method=method)
-        r.add_header("Authorization", f"Bearer {token}")
-        r.add_header("Accept", "application/vnd.github+json")
-        r.add_header("X-GitHub-Api-Version", "2022-11-28")
-        if data:
-            r.add_header("Content-Type", "application/json")
-        try:
-            with urllib.request.urlopen(r) as resp:
-                raw = resp.read()
-                return resp.status, (json.loads(raw) if raw else None)
-        except urllib.error.HTTPError as ex:
-            return ex.code, None
-
-    def ok(status):
-        return 200 <= status < 300
+    req = make_requester(token, api)
 
     def must(status, action):
         if not ok(status):

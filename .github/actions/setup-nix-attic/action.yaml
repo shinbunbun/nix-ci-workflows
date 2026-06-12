@@ -44,6 +44,12 @@ inputs:
     description: 'Attic token (fallback モードのフォールバック / direct モードで使用)'
     required: false
     default: ''
+  extra-nix-config:
+    description: >-
+      両 Install ステップの extra_nix_config 末尾に追記する追加行
+      (例: access-tokens)。空なら従来と等価。
+    required: false
+    default: ''
   needs-sops:
     description: 'true なら SOPS age key を /var/lib/sops-nix/key.txt に書く'
     required: false
@@ -68,6 +74,7 @@ runs:
           netrc-file = /etc/nix/netrc
           fallback = true
           connect-timeout = 5
+          ${{ inputs.extra-nix-config }}
 
     - name: Install Nix with flakes enabled (without Attic)
       if: ${{ inputs.install-nix == 'true' && inputs.use-attic != 'true' }}
@@ -76,6 +83,7 @@ runs:
         nix_path: nixpkgs=channel:nixos-unstable
         extra_nix_config: |
           experimental-features = nix-command flakes
+          ${{ inputs.extra-nix-config }}
 
     - name: Setup SOPS
       if: ${{ inputs.needs-sops == 'true' }}

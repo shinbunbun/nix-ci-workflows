@@ -10,8 +10,6 @@ on:
     paths:
       - 'flake.nix'
       - 'flake.lock'
-      - 'ci/scripts/**'
-      - '.github/workflows/update-tools.yaml'
   pull_request:
     paths:
       - 'ci/scripts/**'
@@ -38,6 +36,10 @@ jobs:
           nix run nixpkgs#python3Packages.pytest -- ci/scripts/tests/ -q
 
   build-and-cache:
+    # キャッシュ更新は push (flake 変更) / schedule / dispatch のみ。
+    # pull_request (ci/scripts のテスト目的) では重いマトリクスビルドと
+    # attic push を走らせない。
+    if: github.event_name != 'pull_request'
     strategy:
       matrix:
         include:

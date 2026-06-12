@@ -1,0 +1,55 @@
+# wireguard dist/ drift チェック Workflow
+#
+# .github/actions/wireguard 配下の変更時に発火し、
+# npm ci && npm run build && git diff --exit-code dist/ を実行して
+# dist/ の再ビルド漏れ (src と dist の乖離) を検出する。
+#
+# @main 参照の caller が古い dist を実行し続ける事故を防ぐ。
+
+name: wireguard dist drift check
+
+on:
+  pull_request:
+    paths:
+      - '.github/actions/wireguard/**'
+      - '.github/workflows/wireguard-dist-check.yaml'
+
+jobs:
+  dist-drift-check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .github/actions/wireguard
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: .github/actions/wireguard/package-lock.json
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Rebuild dist/
+        run: npm run build
+
+      - name: Check dist/ is up to date
+        run: |
+          # 追跡済みファイルの変更に加え、ビルドが新規ファイルを生んだ場合も drift とみなす
+          untracked=$(git ls-files --others --exclude-standard dist/)
+          if [ -n "$untracked" ]; then
+            echo "ERROR: ビルドが未追跡ファイルを生成しました:"
+            echo "$untracked"
+            exit 1
+          fi
+          if ! git diff --exit-code dist/; then
+            echo ""
+            echo "ERROR: dist/ が src から再ビルドされていません。"
+            echo "  src/setup.js または src/teardown.js を変更した場合は"
+            echo "  .github/actions/wireguard/ で npm run build を実行して"
+            echo "  dist/ の変更も同じコミットに含めてください。"
+            exit 1
+          fi

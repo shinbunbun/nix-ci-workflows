@@ -11,12 +11,15 @@ Nix CI/CD用の再利用可能なGitHub Actionsワークフロー集。
 | `build-nix.yaml` | 単一Nixターゲットのビルド + Atticキャッシュpush（オプション） |
 | `deploy-nix.yaml` | deploy-rsによるNixOSデプロイ（WireGuard VPN経由） |
 | `auto-update-flake.yaml` | `nix flake update` + PR自動作成・自動マージ |
+| `scan-vulnerabilities.yaml` | vulnxscan (vulnix/grype/osv) による脆弱性スキャン（report-only） |
+| `update-tools.yaml` | attic/deploy-rs プリビルド & Atticキャッシュ更新 + vulnxscan pytest 実行 |
 
 ## Actions
 
 | アクション | 説明 |
 |---|---|
 | `wireguard` | WireGuard VPN接続（peer-issuer API）。`post`ステップで自動teardown |
+| `setup-nix-attic` | Nix + Atticキャッシュのセットアップ（オプションでSOPS age key投入）。build-nix/deploy-nix/update-tools で共用 |
 
 ## 使用方法
 
@@ -105,7 +108,39 @@ jobs:
       PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
 ```
 
-## WireGuard Action
+### scan-vulnerabilities
+
+`discover-targets` と組み合わせてターゲット別に fan-out スキャンするパターン:
+
+```yaml
+jobs:
+  scan-nixos:
+    needs: discover
+    if: needs.discover.outputs.has-nixos == 'true'
+    strategy:
+      matrix: ${{ fromJSON(needs.discover.outputs.nixos-matrix) }}
+    uses: shinbunbun/nix-ci-workflows/.github/workflows/scan-vulnerabilities.yaml@main
+    with:
+      runner: '["self-hosted", "nixos", "x86_64-linux"]'
+      skip-nix-install: true
+      target: ".#nixosConfigurations.${{ matrix.configuration }}.config.system.build.toplevel"
+  scan-darwin:
+    needs: discover
+    if: needs.discover.outputs.has-darwin == 'true'
+    strategy:
+      matrix: ${{ fromJSON(needs.discover.outputs.darwin-matrix) }}
+    uses: shinbunbun/nix-ci-workflows/.github/workflows/scan-vulnerabilities.yaml@main
+    with:
+      runner: '["self-hosted", "darwin", "aarch64-darwin"]'
+      vulnix-nocheck: true   # darwin は vulnix の checkPhase が sandbox 非互換のため必須
+      target: ".#darwinConfigurations.${{ matrix.configuration }}.config.system.build.toplevel"
+```
+
+スキャン結果はジョブサマリーに出力されます（report-only、CIは失敗しません）。caller repo 内に whitelist CSV を置いて既知 CVE を抑制できます。
+
+## Actions の使用方法
+
+### wireguard
 
 `post`ステップによる自動teardownにより、呼び出し側でteardownを明示する必要がなくなります。
 
@@ -114,6 +149,18 @@ jobs:
   with:
     authentik-client-id: ${{ secrets.AUTHENTIK_CLIENT_ID }}
 # teardownは自動実行 — 明示的な呼び出し不要
+```
+
+### setup-nix-attic
+
+Nix と Attic バイナリキャッシュのセットアップを一括実行する composite action。`build-nix` / `deploy-nix` / `update-tools` の各ワークフローで共用されています。
+
+```yaml
+- uses: shinbunbun/nix-ci-workflows/.github/actions/setup-nix-attic@main
+  with:
+    use-attic: true
+    attic-token-mode: direct
+    attic-token: ${{ secrets.ATTIC_TOKEN }}
 ```
 
 ## 必要なSecrets

@@ -63,6 +63,10 @@ on:
         description: 'Nix インストールをスキップ (self-hosted NixOS/Darwin runner 用)'
         type: boolean
         default: false
+      use-attic:
+        description: 'Attic substituter/netrc を設定して閉包 realise を高速化・unfree パッケージのソースビルド回避'
+        type: boolean
+        default: false
       ci-workflows-ref:
         description: 'helper (script/flake) を取得する nix-ci-workflows の ref'
         type: string
@@ -74,6 +78,12 @@ on:
     secrets:
       NVD_API_KEY:
         description: 'NVD API key (任意)。caller から forward する。未指定でも動くが rate-limit が緩み identity 判定 (#285/#289 の NVD CPE 照会) が安定・高速化する'
+        required: false
+      ATTIC_READ_TOKEN:
+        description: 'Attic read-only token (use-attic 有効時の netrc 認証で優先使用)'
+        required: false
+      ATTIC_TOKEN:
+        description: 'Attic token (use-attic 有効時の netrc 認証のフォールバック)'
         required: false
 
 permissions:
@@ -94,12 +104,13 @@ jobs:
           path: .nix-ci-workflows
 
       - name: Install Nix with flakes enabled
-        if: ${{ !inputs.skip-nix-install }}
-        uses: cachix/install-nix-action@v31
+        uses: shinbunbun/nix-ci-workflows/.github/actions/setup-nix-attic@main
         with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-            access-tokens = github.com=${{ github.token }}
+          install-nix: ${{ !inputs.skip-nix-install }}
+          use-attic: ${{ inputs.use-attic }}
+          attic-read-token: ${{ secrets.ATTIC_READ_TOKEN }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          extra-nix-config: 'access-tokens = github.com=${{ github.token }}'
 
       - name: Run vulnxscan
         env:

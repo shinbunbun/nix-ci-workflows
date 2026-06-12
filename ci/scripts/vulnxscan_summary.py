@@ -48,6 +48,8 @@ import sys
 from collections import Counter, defaultdict, deque
 from functools import lru_cache
 
+from vulnxscan_common import UNKNOWN_CLASSIFY, sevf
+
 csv_path = sys.argv[1] if len(sys.argv) > 1 else "vulns.triage.csv"
 target = sys.argv[2] if len(sys.argv) > 2 else "(unknown)"
 closure_path = sys.argv[3] if len(sys.argv) > 3 else None
@@ -60,21 +62,10 @@ identity_path = sys.argv[7] if len(sys.argv) > 7 else None
 ENTRY_FANOUT_LIMIT = 6  # これを超える入口数 = 基盤依存 (config では直せない)
 ENTRY_SHOW = 3  # 列挙する入口の最大数 (残りは先頭の入口数 "N 入口" で示す)
 
-# 判定不能 (repology にデータ無し / 版解析失敗)。safe ではないので ❓UNKNOWN として
-# surface する (#285a)。err_not_vulnerable_based_on_repology は repology が明示的に
-# 「非該当」と返したものなので DROP のままだが、high-sev は spot-check で可視化 (#285b)。
-UNKNOWN_CLASSIFY = {
-    "err_missing_repology_version",
-    "err_invalid_version",
-}
+# UNKNOWN_CLASSIFY (判定不能 = ❓UNKNOWN として surface) は vulnxscan_common から import (#285a)。
+# err_not_vulnerable_based_on_repology は repology が明示的に「非該当」と返したものなので DROP の
+# ままだが、high-sev は spot-check で可視化 (#285b)。
 HIGH_SEV_SPOTCHECK = 9.0  # repology 非該当でもこの severity 以上は念のため確認リストへ
-
-
-def sevf(x):
-    try:
-        return float(x)
-    except (TypeError, ValueError):
-        return 0.0
 
 
 # closure 解析: package -> {versions} (pin 検出) と reverse-ref graph (由来 / bundled by)

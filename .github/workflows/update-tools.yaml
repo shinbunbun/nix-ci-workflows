@@ -10,12 +10,36 @@ on:
     paths:
       - 'flake.nix'
       - 'flake.lock'
+  pull_request:
+    paths:
+      - 'ci/scripts/**'
+      - '.github/workflows/update-tools.yaml'
   schedule:
     - cron: "0 1 * * *"
   workflow_dispatch:
 
 jobs:
+  test-vulnxscan-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix with flakes enabled
+        uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Run vulnxscan pytest
+        run: |
+          nix run nixpkgs#python3Packages.pytest -- ci/scripts/tests/ -q
+
   build-and-cache:
+    # キャッシュ更新は push (flake 変更) / schedule / dispatch のみ。
+    # pull_request (ci/scripts のテスト目的) では重いマトリクスビルドと
+    # attic push を走らせない。
+    if: github.event_name != 'pull_request'
     strategy:
       matrix:
         include:

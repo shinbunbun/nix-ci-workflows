@@ -26,12 +26,13 @@ jobs:
     runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
     steps:
       - uses: actions/checkout@v6
-      - name: Install Nix with flakes enabled
+      - name: Setup Nix
         if: ${{ !inputs.skip-nix-install }}
-        uses: cachix/install-nix-action@v31
+        uses: shinbunbun/nix-ci-workflows/.github/actions/setup-nix-attic@main
         with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
+          install-nix: 'true'
+          use-attic: 'false'
+          extra-nix-config: |
             access-tokens = github.com=${{ github.token }}
       - name: Check Nix code formatting
         run: nix fmt -- --fail-on-change

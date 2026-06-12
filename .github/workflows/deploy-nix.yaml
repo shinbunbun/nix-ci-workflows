@@ -81,9 +81,11 @@ on:
       SOPS_AGE_KEY:
         required: false
 
-permissions:
-  id-token: write
-  contents: read
+# permissions はあえて宣言せず caller から継承する。
+# reusable が caller より広い permissions を宣言すると、それを付与していない caller は
+# startup_failure になる。caller 側で必要な権限を付与すること:
+#   - 必須: id-token: write (Attic OIDC), contents: read
+# dotfiles-private の deploy.yaml は id-token: write + contents: read を宣言済み。
 
 jobs:
   deploy:

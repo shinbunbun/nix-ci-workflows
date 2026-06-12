@@ -20,6 +20,7 @@ on:
     inputs:
       runner:
         description: 'GitHub Actions runner'
+        required: false
         type: string
         default: 'ubuntu-latest'
       skip-nix-install:

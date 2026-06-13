@@ -167,6 +167,10 @@ jobs:
           git fetch --depth=1 origin "$BASE_REF"
           BASE_REV="$(git rev-parse FETCH_HEAD)"
           BASE_SRC="$(mktemp -d)"
+          # macOS では mktemp -d が /var/folders/... を返すが /var は /private/var への
+          # symlink で、nix の path: フェッチャがパス途中の symlink を拒否する
+          # (error: path '//var' is a symlink)。実パスに正規化して回避する。
+          BASE_SRC="$(cd "$BASE_SRC" && pwd -P)"
           git archive FETCH_HEAD | tar -x -C "$BASE_SRC"
 
           # base の closure を取得。base は push 時に Attic へ送られているため

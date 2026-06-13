@@ -10,6 +10,23 @@
 
 set -euo pipefail
 
+# --- ルーティング対象 IP の単一情報源 ---
+# AllowedIPs (Linux/macOS conf) と Linux の route ループを同一リストから生成し、
+# 片方だけ更新して到達不能になる結合バグを防ぐ。
+# attic-host (/32) + extra-allowed-ips (action input、カンマ区切り CIDR) を結合する。
+ROUTE_TARGETS=("${ATTIC_HOST}/32")
+if [[ -n "${EXTRA_ALLOWED_IPS:-}" ]]; then
+  IFS=',' read -ra _EXTRA_CIDRS <<< "$EXTRA_ALLOWED_IPS"
+  for _cidr in "${_EXTRA_CIDRS[@]}"; do
+    # 前後空白を除去 (カンマ区切りに空白が混じっても許容)
+    _cidr="${_cidr#"${_cidr%%[![:space:]]*}"}"
+    _cidr="${_cidr%"${_cidr##*[![:space:]]}"}"
+    [[ -n "$_cidr" ]] && ROUTE_TARGETS+=("$_cidr")
+  done
+fi
+# conf の AllowedIPs 用にカンマ区切り文字列へ結合
+ALLOWED_IPS=$(IFS=','; echo "${ROUTE_TARGETS[*]}")
+
 # --- WireGuard ツールのインストール ---
 echo "Installing WireGuard tools..."
 if [[ "$RUNNER_OS" == "Linux" ]]; then
@@ -125,7 +142,7 @@ PrivateKey = $PRIVATE_KEY
 [Peer]
 PublicKey = $SERVER_PUBKEY
 Endpoint = $ENDPOINT
-AllowedIPs = ${ATTIC_HOST}/32,192.168.1.4/32,192.168.1.5/32,192.168.1.6/32
+AllowedIPs = ${ALLOWED_IPS}
 PersistentKeepalive = $KEEPALIVE
 EOF
 
@@ -135,10 +152,9 @@ EOF
   sudo ip addr add "${CLIENT_IP}/32" dev wg-ci
   sudo ip link set wg-ci mtu "$MTU"
   sudo ip link set wg-ci up
-  sudo ip route add "${ATTIC_HOST}/32" dev wg-ci
-  sudo ip route add "192.168.1.4/32" dev wg-ci
-  sudo ip route add "192.168.1.5/32" dev wg-ci
-  sudo ip route add "192.168.1.6/32" dev wg-ci
+  for _route in "${ROUTE_TARGETS[@]}"; do
+    sudo ip route add "$_route" dev wg-ci
+  done
 
 elif [[ "$RUNNER_OS" == "macOS" ]]; then
   sudo mkdir -p /etc/wireguard
@@ -151,7 +167,7 @@ MTU = $MTU
 [Peer]
 PublicKey = $SERVER_PUBKEY
 Endpoint = $ENDPOINT
-AllowedIPs = ${ATTIC_HOST}/32,192.168.1.4/32,192.168.1.5/32,192.168.1.6/32
+AllowedIPs = ${ALLOWED_IPS}
 PersistentKeepalive = $KEEPALIVE
 EOF
 

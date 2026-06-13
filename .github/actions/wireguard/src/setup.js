@@ -7,6 +7,7 @@ async function run() {
     const peerIssuerUrl = core.getInput("peer-issuer-url");
     const ttlSeconds = core.getInput("ttl-seconds");
     const atticHost = core.getInput("attic-host");
+    const extraAllowedIps = core.getInput("extra-allowed-ips");
     const authentikUrl = core.getInput("authentik-url");
     const authentikClientId = core.getInput("authentik-client-id");
 
@@ -19,6 +20,7 @@ async function run() {
         PEER_ISSUER_URL: peerIssuerUrl,
         TTL_SECONDS: ttlSeconds,
         ATTIC_HOST: atticHost,
+        EXTRA_ALLOWED_IPS: extraAllowedIps,
         AUTHENTIK_URL: authentikUrl,
         AUTHENTIK_CLIENT_ID: authentikClientId,
         GITHUB_OUTPUT_FILE: outputFile,

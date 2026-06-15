@@ -187,11 +187,15 @@ jobs:
           # diff-closures の引数は installable 扱いなので、out-link 名をそのまま渡すと
           # flakeref と誤解釈される (error: cannot find flake 'flake:result-...')。
           # 実 store パスに解決してから渡す。
-          # diff-closures は TTY でなくても ANSI カラーを出力し (NO_COLOR/--option color 共に無効)、
-          # PR コメント内で生エスケープ列として文字化けするので sed で除去する。
           DIFF="$(nix store diff-closures \
             "$(readlink -f "result-${RESULT_NAME}-base")" \
-            "$(readlink -f "result-${RESULT_NAME}")" | sed -E 's/\x1b\[[0-9;]*m//g')"
+            "$(readlink -f "result-${RESULT_NAME}")")"
+          # diff-closures は TTY でなくても ANSI カラーを出力し (NO_COLOR/--option color 共に無効)、
+          # PR コメント内で生エスケープ列として文字化けする。bash 内蔵 (extglob) で除去する
+          # — sed に依存すると gnused が PATH に無い runner (darwin self-hosted 等) で
+          # 'sed: command not found' になり step が落ちるため。
+          shopt -s extglob
+          DIFF="${DIFF//$'\e'\[*([0-9;])m/}"
           if [ -z "$DIFF" ]; then
             DIFF="(no package version changes in the runtime closure)"
           fi

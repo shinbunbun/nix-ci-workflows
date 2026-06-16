@@ -163,6 +163,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          # コメント投稿に gh を使う。self-hosted runner (darwin 等) では gh が PATH に
+          # 無いことがある (nixos-desktop / GitHub-hosted runner には在る)。
+          # 無ければ nix から供給する (nix は必ず在る)。在れば追加コストなし。
+          if ! command -v gh >/dev/null 2>&1; then
+            PATH="$(nix build --no-link --print-out-paths nixpkgs#gh)/bin:$PATH"
+          fi
+
           # base ref (= 更新前) を取得し、その時点のツリーを展開
           git fetch --depth=1 origin "$BASE_REF"
           BASE_REV="$(git rev-parse FETCH_HEAD)"

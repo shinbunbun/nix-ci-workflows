@@ -1,0 +1,165 @@
+# PR diff-gate reusable workflow (#347)
+#
+# closure の差分 store path (= この PR が足したパス) だけを vulnix で検査する producer。
+# target ごと・対象プラットフォームの runner で実行し、introduced findings を artifact 出力する。
+# caller 側の aggregator job が全 target の結果を集約して PR コメント + gate 判定を行う。
+#
+# 設計の肝 (#347): **flake を build/eval した後** (= 全 closure path の .drv = derivers が
+# store に揃う) に vulnix -R を回すこと。別ジョブで output path を substitute するだけだと
+# Attic 由来 (unfree/カスタム: terraform/claude-code 等) の deriver が失われ vulnix が
+# DeriverLookupError でクラッシュするため、必ず eval 済みコンテキストで実行する。
+# 脆弱性データは head 側 vulnix の 1 スキャンからのみ読む (base は閉包のパス集合=決定的な事実
+# だけ使う) ので、DB ドリフト/NVD 404 起因の誤検出は構造的に発生しない。
+#
+# 使用方法 (caller 側で discover と組み合わせて PR 時に fan-out):
+#   diff-gate-nixos:
+#     needs: discover
+#     if: github.event_name == 'pull_request' && needs.discover.outputs.has-nixos == 'true'
+#     strategy:
+#       matrix: ${{ fromJSON(needs.discover.outputs.nixos-matrix) }}
+#     uses: shinbunbun/nix-ci-workflows/.github/workflows/diff-gate.yaml@main
+#     with:
+#       runner: '["self-hosted", "nixos", "x86_64-linux"]'
+#       target: ".#nixosConfigurations.${{ matrix.configuration }}.config.system.build.toplevel"
+
+name: Diff Gate
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'GitHub Actions runner (string か JSON 配列)'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+      target:
+        description: 'スキャン対象の Nix flake target (runtime closure)'
+        type: string
+        required: true
+      vulnix-nocheck:
+        description: 'vulnix を doCheck/checkPhase 無効版に差し替える (darwin で必須)'
+        type: boolean
+        default: false
+      skip-nix-install:
+        description: 'Nix インストールをスキップ (self-hosted NixOS/Darwin runner 用)'
+        type: boolean
+        default: false
+      use-attic:
+        description: 'Attic substituter/netrc を設定して閉包 realise を高速化'
+        type: boolean
+        default: false
+      ci-workflows-ref:
+        description: 'helper (script) を取得する nix-ci-workflows の ref'
+        type: string
+        default: 'main'
+    secrets:
+      ATTIC_READ_TOKEN:
+        required: false
+      ATTIC_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  actions: read   # main 最新スキャンの closure-paths artifact を gh run download するため
+
+jobs:
+  diff-gate:
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
+    steps:
+      - name: Checkout target repo
+        uses: actions/checkout@v6
+
+      - name: Checkout nix-ci-workflows helpers
+        uses: actions/checkout@v6
+        with:
+          repository: shinbunbun/nix-ci-workflows
+          ref: ${{ inputs.ci-workflows-ref }}
+          path: .nix-ci-workflows
+
+      - name: Install Nix with flakes enabled
+        uses: shinbunbun/nix-ci-workflows/.github/actions/setup-nix-attic@main
+        with:
+          install-nix: ${{ !inputs.skip-nix-install }}
+          use-attic: ${{ inputs.use-attic }}
+          attic-read-token: ${{ secrets.ATTIC_READ_TOKEN }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          extra-nix-config: 'access-tokens = github.com=${{ github.token }}'
+
+      - name: Build target (instantiate flake → derivers + closure 完備)
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          # flake を eval/build することで closure 全パスの .drv (deriver) が store に揃い、
+          # vulnix -R が deriver を解決できる。出力はキャッシュから substitute されても、
+          # eval により .drv は生成されるので deriver は判明する。
+          nix build "$TARGET" --no-link --print-out-paths > /dev/null
+
+      - name: Capture head closure paths
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          { echo "# target: $TARGET"; nix path-info -r "$TARGET"; } > "$RUNNER_TEMP/head.txt"
+
+      - name: Download baseline closure paths (main 最新スキャン)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          # main scan が上げた vulnxscan-paths-<sanitized target> を baseline に使う。
+          # 閉包のパス集合は「決定的な事実」なので脆弱性データのように時刻で揺れない。
+          safe="${TARGET//[^a-zA-Z0-9._-]/-}"
+          NAME="vulnxscan-paths-${safe:0:100}"
+          rm -rf "$RUNNER_TEMP/base" && mkdir -p "$RUNNER_TEMP/base"
+          RIDS=$(nix run nixpkgs#gh -- run list \
+            --workflow "Scan Vulnerabilities" --branch main --status success \
+            --limit 10 --json databaseId --jq '.[].databaseId' 2>/dev/null || true)
+          for RID in $RIDS; do
+            rm -rf "$RUNNER_TEMP/base" && mkdir -p "$RUNNER_TEMP/base"
+            if nix run nixpkgs#gh -- run download "$RID" \
+                 --name "$NAME" --dir "$RUNNER_TEMP/base" 2>/dev/null \
+               && [ -f "$RUNNER_TEMP/base/closure-paths.txt" ]; then
+              echo "baseline = main run $RID"
+              break
+            fi
+          done
+          if [ ! -f "$RUNNER_TEMP/base/closure-paths.txt" ]; then
+            echo "::warning::baseline (main の $NAME) が見つかりません (baseline 不在として継続)"
+          fi
+
+      - name: Scan delta with vulnix
+        env:
+          TARGET: ${{ inputs.target }}
+          NOCHECK: ${{ inputs.vulnix-nocheck }}
+        run: |
+          set -euo pipefail
+          # vulnix を PATH に供給。darwin は checkPhase 無効版 (nocheck flake)、それ以外は nixpkgs。
+          if [ "$NOCHECK" = "true" ]; then
+            VULNIX="path:.nix-ci-workflows/ci/vulnix-nocheck#vulnix"
+          else
+            VULNIX="nixpkgs#vulnix"
+          fi
+          BASE="$RUNNER_TEMP/base/closure-paths.txt"
+          # base 不在でも scan_delta が baseline_missing として graceful 処理する。
+          nix shell "$VULNIX" nixpkgs#python3 -c python3 \
+            .nix-ci-workflows/ci/scripts/vulnxscan_diff_gate.py scan \
+            "$RUNNER_TEMP/head.txt" "$BASE" "$RUNNER_TEMP/introduced.json"
+
+      - name: Compute artifact name
+        id: artifact
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          safe="${TARGET//[^a-zA-Z0-9._-]/-}"
+          echo "name=vulnxscan-introduced-${safe:0:100}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload introduced findings
+        if: always() && steps.artifact.outputs.name != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ runner.temp }}/introduced.json
+          if-no-files-found: ignore

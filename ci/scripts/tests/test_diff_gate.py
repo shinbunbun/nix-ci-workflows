@@ -1,15 +1,16 @@
-"""vulnxscan_diff_gate.py の純粋関数テスト (#347 diff-gate)。
+"""vulnxscan_diff_gate.py の純粋関数テスト (#347 diff-gate, B 設計)。
 
-実 vulnix を起動せず、runner 注入 (collect/run_vulnix の runner 引数) で
-Δ 計算・パース・whitelist・fail-closed・body 生成を GitHub I/O 非依存に検証する。
+実 vulnix を起動せず runner 注入で producer (scan_delta) / aggregator (aggregate) /
+パース・deriver フィルタ・whitelist・body 生成を GitHub I/O 非依存に検証する。
 vulnix --json の実スキーマ (pname/version/affected_by/cvssv3_basescore) を実測値で固定する。
 """
 import json
 
 import vulnxscan_diff_gate as gate
 
+_HOST = ".#nixosConfigurations.host.config.system.build.toplevel"
 
-# 実測した vulnix --json の 1 要素 (openssl) を模した payload を作る。
+
 def _pkg(pname, version, cves_scores):
     return {
         "name": f"{pname}-{version}",
@@ -23,8 +24,6 @@ def _pkg(pname, version, cves_scores):
 
 
 def _runner_returning(pkgs, rc=2):
-    """成功 runner: vulnix が JSON list を返すケース (rc は脆弱性ありで 2 でも成功扱い)。"""
-
     def runner(chunk):
         return rc, json.dumps(pkgs), ""
 
@@ -32,16 +31,11 @@ def _runner_returning(pkgs, rc=2):
 
 
 def _runner_crash(chunk):
-    """fail-closed runner: vulnix がクラッシュし stdout が空 (404 等)。"""
     return 1, "", "Traceback ...\nrequests.exceptions.HTTPError: 404"
 
 
-def _write_closure(directory, target, paths):
-    """download-artifact 展開を模し <dir>/<sub>/closure-paths.txt をヘッダ付きで書く。"""
-    sub = directory / target.replace("/", "_").replace("#", "_").replace(".", "_")
-    sub.mkdir(parents=True, exist_ok=True)
-    body = f"# target: {target}\n" + "\n".join(paths) + "\n"
-    (sub / "closure-paths.txt").write_text(body)
+def _closure(path, target, paths):
+    path.write_text(f"# target: {target}\n" + "\n".join(paths) + "\n")
 
 
 # ------------------------- _extract_findings -------------------------
@@ -56,8 +50,9 @@ def test_extract_findings_real_schema():
 
 def test_extract_findings_missing_score_is_blank():
     pkgs = [{"pname": "p", "version": "1", "affected_by": ["CVE-X"], "cvssv3_basescore": {}}]
-    out = gate._extract_findings(pkgs)
-    assert out == [{"pname": "p", "version": "1", "vuln_id": "CVE-X", "severity": ""}]
+    assert gate._extract_findings(pkgs) == [
+        {"pname": "p", "version": "1", "vuln_id": "CVE-X", "severity": ""}
+    ]
 
 
 # ------------------------- run_vulnix (fail-closed) -------------------------
@@ -69,7 +64,7 @@ def test_run_vulnix_success_parses_list():
     assert findings == [{"pname": "p", "version": "1", "vuln_id": "CVE-A", "severity": "5.0"}]
 
 
-def test_run_vulnix_empty_list_is_success_not_failure():
+def test_run_vulnix_empty_list_is_success():
     findings, err = gate.run_vulnix({"/nix/store/a"}, runner=_runner_returning([], rc=0))
     assert err is None and findings == []
 
@@ -79,61 +74,93 @@ def test_run_vulnix_non_json_is_fail_closed():
     assert findings == [] and err is not None and "404" in err
 
 
-# ------------------------- collect -------------------------
-_HOST = ".#nixosConfigurations.host.config.system.build.toplevel"
-_NEWHOST = ".#nixosConfigurations.newhost.config.system.build.toplevel"
+# ------------------------- scannable_paths (deriver フィルタ) -------------------------
+def test_scannable_paths_drops_unknown_and_missing_deriver():
+    derivers = {
+        "/nix/store/a-openssl-3.6.2": "/nix/store/x-openssl-3.6.2.drv",
+        "/nix/store/b-unit-home-manager.service": "unknown-deriver",
+        "/nix/store/c-glibc-2.42": "/nix/store/y-glibc-2.42.drv",
+        "/nix/store/d-reference-manpage": "",
+    }
+    out = gate.scannable_paths(list(derivers), query=lambda p: derivers[p])
+    assert out == ["/nix/store/a-openssl-3.6.2", "/nix/store/c-glibc-2.42"]
 
 
-def test_collect_only_delta_paths_scanned(tmp_path):
-    head = tmp_path / "head"
-    base = tmp_path / "base"
-    # head は glibc(共有・base にもある) と新規 foo。base は glibc のみ。
-    _write_closure(head, _HOST, ["/nix/store/glibc", "/nix/store/foo"])
-    _write_closure(base, _HOST, ["/nix/store/glibc"])
+# ------------------------- scan_delta (producer) -------------------------
+def test_scan_delta_only_delta_paths_scanned(tmp_path):
+    head = tmp_path / "head.txt"
+    base = tmp_path / "base.txt"
+    out = tmp_path / "out.json"
+    # head は glibc(共有) と新規 foo。base は glibc のみ。
+    _closure(head, _HOST, ["/nix/store/glibc", "/nix/store/foo"])
+    _closure(base, _HOST, ["/nix/store/glibc"])
     seen = {}
 
     def runner(chunk):
         seen["chunk"] = list(chunk)
         return 2, json.dumps([_pkg("foo", "1", {"CVE-FOO": 9.8})]), ""
 
-    introduced, missing, failed = gate.collect(str(head), str(base), (set(), set()), runner=runner)
-    # Δ = {foo} のみ (glibc は base にもあるので渡らない = 誤検出しない)
-    assert seen["chunk"] == ["/nix/store/foo"]
-    assert ("CVE-FOO", "foo") in introduced
-    assert introduced[("CVE-FOO", "foo")]["targets"] == {"host"}
-    assert not missing and not failed
+    res = gate.scan_delta(str(head), str(base), str(out), runner=runner)
+    assert seen["chunk"] == ["/nix/store/foo"]  # glibc(共有)は渡らない
+    assert res["label"] == "host"
+    assert res["findings"][0]["vuln_id"] == "CVE-FOO"
+    assert res["scan_failed"] is None and not res["baseline_missing"]
+    assert json.load(open(out))["findings"]  # out.json に書かれている
 
 
-def test_collect_baseline_missing(tmp_path):
-    head = tmp_path / "head"
-    base = tmp_path / "base"
-    base.mkdir()
-    _write_closure(head, _NEWHOST, ["/nix/store/foo"])
-    introduced, missing, failed = gate.collect(
-        str(head), str(base), (set(), set()), runner=_runner_returning([_pkg("foo", "1", {"C": 1.0})])
+def test_scan_delta_baseline_missing(tmp_path):
+    head = tmp_path / "head.txt"
+    out = tmp_path / "out.json"
+    _closure(head, _HOST, ["/nix/store/foo"])
+    res = gate.scan_delta(
+        str(head), str(tmp_path / "nope.txt"), str(out),
+        runner=_runner_returning([_pkg("foo", "1", {"C": 1.0})]),
     )
-    assert missing == ["newhost"] and not introduced and not failed
+    assert res["baseline_missing"] and not res["findings"] and res["scan_failed"] is None
 
 
-def test_collect_scan_failure_is_recorded(tmp_path):
-    head = tmp_path / "head"
-    base = tmp_path / "base"
-    _write_closure(head, _HOST, ["/nix/store/foo"])
-    _write_closure(base, _HOST, [])
-    introduced, missing, failed = gate.collect(str(head), str(base), (set(), set()), runner=_runner_crash)
-    assert "host" in failed and not introduced
+def test_scan_delta_scan_failure(tmp_path):
+    head = tmp_path / "head.txt"
+    base = tmp_path / "base.txt"
+    out = tmp_path / "out.json"
+    _closure(head, _HOST, ["/nix/store/foo"])
+    _closure(base, _HOST, [])
+    res = gate.scan_delta(str(head), str(base), str(out), runner=_runner_crash)
+    assert res["scan_failed"] and "404" in res["scan_failed"] and not res["findings"]
 
 
-def test_collect_whitelist_filters(tmp_path):
-    head = tmp_path / "head"
-    base = tmp_path / "base"
-    _write_closure(head, _HOST, ["/nix/store/foo"])
-    _write_closure(base, _HOST, [])
+def test_scan_delta_whitelist(tmp_path):
+    head = tmp_path / "head.txt"
+    base = tmp_path / "base.txt"
+    out = tmp_path / "out.json"
+    _closure(head, _HOST, ["/nix/store/foo"])
+    _closure(base, _HOST, [])
     runner = _runner_returning([_pkg("foo", "1", {"CVE-WL": 9.8, "CVE-KEEP": 5.0})])
-    wl = ({"CVE-WL"}, set())
-    introduced, _, _ = gate.collect(str(head), str(base), wl, runner=runner)
-    assert ("CVE-KEEP", "foo") in introduced
-    assert ("CVE-WL", "foo") not in introduced
+    res = gate.scan_delta(str(head), str(base), str(out), whitelist=({"CVE-WL"}, set()), runner=runner)
+    ids = {f["vuln_id"] for f in res["findings"]}
+    assert ids == {"CVE-KEEP"}
+
+
+# ------------------------- aggregate (aggregator) -------------------------
+def test_aggregate_collects_findings_and_failures(tmp_path):
+    d = tmp_path / "introduced"
+    d.mkdir()
+    (d / "host.json").write_text(json.dumps({
+        "target": _HOST, "label": "host",
+        "findings": [{"vuln_id": "CVE-A", "pname": "p", "severity": "9.8"}],
+        "scan_failed": None, "baseline_missing": False,
+    }))
+    (d / "mac.json").write_text(json.dumps({
+        "label": "mac", "findings": [], "scan_failed": "vulnix 404", "baseline_missing": False,
+    }))
+    (d / "new.json").write_text(json.dumps({
+        "label": "newhost", "findings": [], "scan_failed": None, "baseline_missing": True,
+    }))
+    introduced, missing, failed = gate.aggregate(str(d))
+    assert ("CVE-A", "p") in introduced
+    assert introduced[("CVE-A", "p")]["targets"] == {"host"}
+    assert failed == {"mac": "vulnix 404"}
+    assert missing == ["newhost"]
 
 
 # ------------------------- build_body (blocked 判定) -------------------------
@@ -151,6 +178,11 @@ def test_build_body_clean_does_not_block():
 def test_build_body_scan_failed_blocks_fail_closed():
     body, blocked = gate.build_body({}, [], {"host": "vulnix 404"}, gate_mode=True)
     assert blocked and "fail-closed" in body
+
+
+def test_build_body_baseline_missing_does_not_block():
+    body, blocked = gate.build_body({}, ["newhost"], {}, gate_mode=True)
+    assert not blocked and "baseline" in body
 
 
 # ------------------------- load_whitelist -------------------------

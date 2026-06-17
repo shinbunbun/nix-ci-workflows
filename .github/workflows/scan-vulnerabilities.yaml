@@ -146,6 +146,11 @@ jobs:
           # の両方に使う。JSON パースは python 側 (darwin runner では jq/sed が PATH に
           # 無いことがあるため外部ツール非依存にする)。
           nix path-info -r --json "$TARGET" > "$RUNNER_TEMP/closure.json" 2>/dev/null || true
+          # diff-gate (#347) 用: runtime closure の store path 集合を target ヘッダ付きで出力。
+          # PR run = head / main run = base として download-artifact 経由で突き合わせ、
+          # 差分 (= この PR が足したパス) だけを vulnix で再スキャンする。
+          { echo "# target: $TARGET"; nix path-info -r "$TARGET" 2>/dev/null; } \
+            > "$RUNNER_TEMP/closure-paths.txt" || true
 
       - name: Resolve config provenance (入口/設定)
         id: resolve-provenance
@@ -267,6 +272,7 @@ jobs:
           # 無いことがあるため外部ツールに依存しない)。
           safe="${TARGET//[^a-zA-Z0-9._-]/-}"
           echo "name=vulnxscan-signal-${safe:0:100}" >> "$GITHUB_OUTPUT"
+          echo "paths_name=vulnxscan-paths-${safe:0:100}" >> "$GITHUB_OUTPUT"
 
       - name: Upload NOTIFY report
         if: always() && inputs.upload-report && steps.artifact.outputs.name != ''
@@ -274,4 +280,14 @@ jobs:
         with:
           name: ${{ steps.artifact.outputs.name }}
           path: ${{ runner.temp }}/notify.json
+          if-no-files-found: ignore
+
+      # diff-gate (#347) 用の closure paths を別 artifact で上げる。集約 (vulnxscan-signal-*)
+      # とは分離し、PR の diff-gate だけが vulnxscan-paths-* を参照する。
+      - name: Upload closure paths (diff-gate head/base)
+        if: always() && inputs.upload-report && steps.artifact.outputs.paths_name != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact.outputs.paths_name }}
+          path: ${{ runner.temp }}/closure-paths.txt
           if-no-files-found: ignore

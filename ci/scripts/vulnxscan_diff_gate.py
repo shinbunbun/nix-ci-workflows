@@ -49,9 +49,11 @@ env (gate サブコマンドのみ):
   GITHUB_REPOSITORY  "owner/repo"
   GITHUB_API_URL     省略時 https://api.github.com
 """
+import csv
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -176,36 +178,68 @@ def run_vulnix(paths, *, runner=None):
 
 
 def load_whitelist(path):
-    """gate 用 whitelist を読む。1 行 1 エントリ: `CVE-ID` または `pname,CVE-ID`。"""
-    cve_only, pkg_cve = set(), set()
+    """gate 用 whitelist を読み、[(vuln_id 正規表現, pname|None), ...] を返す。
+
+    フル vulnxscan (`--whitelist`) と **同一ファイルを共用**できるよう 2 形式を受理する:
+
+      - sbomnix/vulnxscan 3 列 CSV (ヘッダ `vuln_id,comment,package`、リポジトリの
+        `.github/vulnxscan-whitelist.csv` で使う本命形式):
+        vuln_id 列は**正規表現** (例 `^CVE-2021-4034$`)、package 列は pname (空可)。
+      - レガシー簡易形式 (1 列): `CVE-ID` (完全一致) または `pname,CVE-ID` (完全一致)。
+        `#` 以降は行コメント。
+
+    package/pname が空のエントリは「全 pname にマッチ」(CVE 単位の受容) とみなす。
+    """
+    matchers = []
     if not path:
-        return cve_only, pkg_cve
+        return matchers
     try:
-        with open(path) as f:
-            for line in f:
-                s = line.split("#", 1)[0].strip()
-                if not s:
-                    continue
-                if "," in s:
-                    pkg, cve = (x.strip() for x in s.split(",", 1))
-                    pkg_cve.add((pkg, cve))
-                else:
-                    cve_only.add(s)
+        with open(path, newline="") as f:
+            rows = list(csv.reader(f))
     except OSError:
-        pass
-    return cve_only, pkg_cve
+        return matchers
+    for row in rows:
+        if not row:
+            continue
+        first = row[0].strip()
+        # ヘッダ行 (vuln_id,...) と # コメント行 / 空行をスキップ。
+        if not first or first.startswith("#") or first == "vuln_id":
+            continue
+        if len(row) >= 3:
+            # sbomnix 3 列: vuln_id(正規表現), comment, package。
+            pattern, pname = first, (row[2].strip() or None)
+        elif len(row) == 2:
+            # レガシー `pname,CVE-ID` (完全一致)。
+            pname, pattern = (first or None), "^" + re.escape(row[1].strip()) + "$"
+        else:
+            # レガシー `CVE-ID` 単体 (# 以降コメント、完全一致)。
+            cve = first.split("#", 1)[0].strip()
+            if not cve:
+                continue
+            pname, pattern = None, "^" + re.escape(cve) + "$"
+        try:
+            matchers.append((re.compile(pattern), pname))
+        except re.error:
+            # 不正な正規表現は無視 (whitelist の typo で gate を壊さない)。
+            continue
+    return matchers
 
 
-def apply_whitelist(findings, wl):
-    cve_only, pkg_cve = wl
-    return [
-        f
-        for f in findings
-        if f["vuln_id"] not in cve_only and (f["pname"], f["vuln_id"]) not in pkg_cve
-    ]
+def apply_whitelist(findings, matchers):
+    """matchers (load_whitelist の戻り値) にマッチする finding を除外する。"""
+    if not matchers:
+        return findings
+
+    def whitelisted(f):
+        vid, pname = f.get("vuln_id", ""), f.get("pname", "")
+        return any(
+            rx.search(vid) and (pn is None or pn == pname) for rx, pn in matchers
+        )
+
+    return [f for f in findings if not whitelisted(f)]
 
 
-def scan_delta(head_closure, base_closure, out_json, *, whitelist=(set(), set()), runner=None):
+def scan_delta(head_closure, base_closure, out_json, *, whitelist=(), runner=None):
     """[producer] 1 target の Δ を vulnix で検査し out_json に結果を書く。
 
     出力 JSON: {"target", "label", "findings": [...], "scan_failed": str|None,

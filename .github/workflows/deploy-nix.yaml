@@ -67,6 +67,19 @@ on:
         required: false
         type: string
         default: 'https://cache.shinbunbun.com'
+      wait-k3s-healthy:
+        description: |
+          deploy 後に対象ノードの k3s /healthz（etcd 含む）が ok になるまで待機する。
+          embedded etcd の HA クラスタで「deploy が返る = そのノードがクォーラムに復帰済み」を
+          保証し、複数ノードの同時 restart によるクォーラム喪失を防ぐためのゲート。
+        required: false
+        type: boolean
+        default: false
+      k3s-healthy-timeout:
+        description: 'k3s healthy 待ちのタイムアウト秒数'
+        required: false
+        type: string
+        default: '300'
     secrets:
       AUTHENTIK_CLIENT_ID:
         required: false
@@ -149,6 +162,28 @@ jobs:
           nix run github:shinbunbun/nix-ci-workflows#deploy-rs -- \
             --skip-checks \
             ${{ inputs.deploy-target }}
+
+      - name: Wait for k3s node to rejoin etcd quorum
+        if: inputs.wait-k3s-healthy
+        timeout-minutes: 10
+        run: |
+          # deploy-rs の switch で k3s.service が restart された場合、systemctl が
+          # active を返しても etcd がクォーラムへ復帰したとは限らない。次のノードの
+          # restart を始める前に、対象ノード自身の k3s /healthz（etcd サブチェック含む）が
+          # ok になるまで待機する。これにより「同時に 2 メンバーが落ちる窓」を塞ぐ。
+          DEADLINE=$(( $(date +%s) + ${{ inputs.k3s-healthy-timeout }} ))
+          until ssh ${{ inputs.ssh-hostname }} \
+            "sudo k3s kubectl get --raw '/healthz?verbose'" 2>/dev/null | grep -q 'healthz check passed'; do
+            if [[ $(date +%s) -ge $DEADLINE ]]; then
+              echo "::error::k3s node ${{ inputs.ssh-hostname }} did not become healthy within ${{ inputs.k3s-healthy-timeout }}s"
+              echo "--- last /healthz output ---"
+              ssh ${{ inputs.ssh-hostname }} "sudo k3s kubectl get --raw '/healthz?verbose'" || true
+              exit 1
+            fi
+            echo "Waiting for ${{ inputs.ssh-hostname }} k3s /healthz (incl. etcd) to pass..."
+            sleep 5
+          done
+          echo "k3s node ${{ inputs.ssh-hostname }} is healthy (etcd quorum rejoined)"
 
       - name: Notify deployment success
         if: success()

@@ -135,8 +135,12 @@ def test_scan_delta_whitelist(tmp_path):
     out = tmp_path / "out.json"
     _closure(head, _HOST, ["/nix/store/foo"])
     _closure(base, _HOST, [])
+    wl = tmp_path / "wl.csv"
+    wl.write_text('vuln_id,comment,package\n^CVE-WL$,"受容理由",\n')
     runner = _runner_returning([_pkg("foo", "1", {"CVE-WL": 9.8, "CVE-KEEP": 5.0})])
-    res = gate.scan_delta(str(head), str(base), str(out), whitelist=({"CVE-WL"}, set()), runner=runner)
+    res = gate.scan_delta(
+        str(head), str(base), str(out), whitelist=gate.load_whitelist(str(wl)), runner=runner
+    )
     ids = {f["vuln_id"] for f in res["findings"]}
     assert ids == {"CVE-KEEP"}
 
@@ -185,9 +189,32 @@ def test_build_body_baseline_missing_does_not_block():
     assert not blocked and "baseline" in body
 
 
-# ------------------------- load_whitelist -------------------------
+# ------------------------- load_whitelist / apply_whitelist -------------------------
 def test_load_whitelist_formats(tmp_path):
+    """sbomnix 3 列 CSV (正規表現+package) とレガシー簡易形式の混在を受理する。"""
     wl = tmp_path / "wl.csv"
-    wl.write_text("CVE-1  # 受容理由\nopenssl,CVE-2\n\n# comment\n")
-    cve_only, pkg_cve = gate.load_whitelist(str(wl))
-    assert cve_only == {"CVE-1"} and pkg_cve == {("openssl", "CVE-2")}
+    wl.write_text(
+        "vuln_id,comment,package\n"
+        '^CVE-2021-4034$,"polkit FP",polkit\n'
+        "CVE-1  # 受容理由\n"
+        "openssl,CVE-2\n"
+        "\n# comment\n"
+    )
+    matchers = gate.load_whitelist(str(wl))
+    findings = [
+        {"vuln_id": "CVE-2021-4034", "pname": "polkit"},  # sbomnix 正規表現+pkg 一致 → drop
+        {"vuln_id": "CVE-2021-4034", "pname": "other"},   # pkg 不一致 → keep
+        {"vuln_id": "CVE-1", "pname": "anything"},         # legacy CVE 単体 → drop
+        {"vuln_id": "CVE-2", "pname": "openssl"},          # legacy pname,CVE 一致 → drop
+        {"vuln_id": "CVE-2", "pname": "curl"},             # pkg 不一致 → keep
+        {"vuln_id": "CVE-9", "pname": "x"},                # 無関係 → keep
+    ]
+    kept = {(f["vuln_id"], f["pname"]) for f in gate.apply_whitelist(findings, matchers)}
+    assert kept == {("CVE-2021-4034", "other"), ("CVE-2", "curl"), ("CVE-9", "x")}
+
+
+def test_load_whitelist_empty_and_missing(tmp_path):
+    """空/不在 whitelist は finding をそのまま通す (regression: 旧 (set,set) の真偽判定罠)。"""
+    findings = [{"vuln_id": "CVE-X", "pname": "p"}]
+    assert gate.apply_whitelist(findings, gate.load_whitelist(None)) == findings
+    assert gate.apply_whitelist(findings, gate.load_whitelist(str(tmp_path / "nope.csv"))) == findings

@@ -52,6 +52,13 @@ on:
         description: 'helper (script) を取得する nix-ci-workflows の ref'
         type: string
         default: 'main'
+      whitelist:
+        description: >-
+          gate whitelist (caller repo 相対パス)。確定 FP / リスク受容を introduced から除外する。
+          フル vulnxscan と同じ sbomnix 3 列 CSV (vuln_id 正規表現, comment, package) を共用可。
+          ファイル不在ならスキップ。
+        type: string
+        default: '.github/vulnxscan-whitelist.csv'
     secrets:
       ATTIC_READ_TOKEN:
         required: false
@@ -133,6 +140,7 @@ jobs:
         env:
           TARGET: ${{ inputs.target }}
           NOCHECK: ${{ inputs.vulnix-nocheck }}
+          WHITELIST: ${{ inputs.whitelist }}
         run: |
           set -euo pipefail
           # vulnix を PATH に供給。darwin は checkPhase 無効版 (nocheck flake)、それ以外は nixpkgs。
@@ -142,10 +150,19 @@ jobs:
             VULNIX="nixpkgs#vulnix"
           fi
           BASE="$RUNNER_TEMP/base/closure-paths.txt"
+          # whitelist (確定 FP / リスク受容) が存在すれば introduced から除外する。不在なら無視。
+          WL_ARGS=()
+          if [ -n "${WHITELIST:-}" ] && [ -f "$WHITELIST" ]; then
+            WL_ARGS=(--whitelist "$WHITELIST")
+            echo "gate whitelist = $WHITELIST"
+          else
+            echo "::notice::gate whitelist (${WHITELIST:-未指定}) が無いため whitelist 無しでスキャン"
+          fi
           # base 不在でも scan_delta が baseline_missing として graceful 処理する。
           nix shell "$VULNIX" nixpkgs#python3 -c python3 \
             .nix-ci-workflows/ci/scripts/vulnxscan_diff_gate.py scan \
-            "$RUNNER_TEMP/head.txt" "$BASE" "$RUNNER_TEMP/introduced.json"
+            "$RUNNER_TEMP/head.txt" "$BASE" "$RUNNER_TEMP/introduced.json" \
+            ${WL_ARGS[@]+"${WL_ARGS[@]}"}
 
       - name: Compute artifact name
         id: artifact

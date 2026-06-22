@@ -122,8 +122,20 @@ def _default_runner(chunk):
     if not scannable:
         # 差分が生成物のみ (deriver 無し) = 検査対象パッケージ無し → 脆弱性なし扱い。
         return 0, "[]", ""
+    cmd = ["vulnix", "-R", "--json"]
+    # NVD フィードの LAN ミラー (VULNIX_MIRROR) / キャッシュ dir (VULNIX_CACHE_DIR) を
+    # env 経由で受ける。vulnix は NVD 2.0 バルクフィードを timeout=10 (inter-byte stall) で
+    # 取りに行くため、throttle 中の NVD 直取得は chronic に失敗する。LAN ミラーを指せば
+    # 連続供給で timeout を踏まず、CI を NVD の可用性から切り離せる。未設定なら従来どおり
+    # vulnix デフォルト (nvd.nist.gov) を使う。
+    mirror = os.environ.get("VULNIX_MIRROR", "").strip()
+    if mirror:
+        cmd += ["-m", mirror]
+    cache_dir = os.environ.get("VULNIX_CACHE_DIR", "").strip()
+    if cache_dir:
+        cmd += ["-c", cache_dir]
     proc = subprocess.run(
-        ["vulnix", "-R", "--json", *scannable],
+        [*cmd, *scannable],
         capture_output=True,
         text=True,
         check=False,

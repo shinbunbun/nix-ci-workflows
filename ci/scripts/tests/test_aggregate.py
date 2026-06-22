@@ -84,7 +84,7 @@ def test_build_body_counts_and_buckets(tmp_path):
              "classify": "err_invalid_version", "version_local": "3.0"},
         ],
     })
-    body, has_content, counts = agg.build_body(signals)
+    body, has_content, counts, tracked = agg.build_body(signals)
     assert has_content is True
     # NOTIFY = fixable(CVE-B) + no-fix(CVE-A) = 2、UNKNOWN = 1。
     assert counts == {"items": 2, "judged": 0, "unknown": 1, "reclass": 0, "likely": 0}
@@ -93,10 +93,57 @@ def test_build_body_counts_and_buckets(tmp_path):
     # short_target で config 名に縮退して影響ターゲット列に出る。
     assert "host-a" in body
     assert "CVE-A" in body and "CVE-B" in body and "CVE-C" in body
+    # tracked = vid -> [sev, bucket, pkg]。UNKNOWN も追跡対象に含む。
+    assert tracked == {
+        "CVE-A": ["9.8", "no-fix", "bar"],
+        "CVE-B": ["7.0", "fixable", "foo"],
+        "CVE-C": ["5.0", "UNKNOWN", "baz"],
+    }
+    # 本文末尾に隠し state マーカーが埋まり、抽出すると tracked に一致する。
+    assert agg._extract_state(body) == tracked
 
 
 def test_build_body_empty_when_no_signals(tmp_path):
-    body, has_content, counts = agg.build_body(str(tmp_path))
+    body, has_content, counts, tracked = agg.build_body(str(tmp_path))
     assert has_content is False
     assert counts == {"items": 0, "judged": 0, "unknown": 0, "reclass": 0, "likely": 0}
     assert "現在 NOTIFY / UNKNOWN / reclassified 対象の脆弱性はありません" in body
+    # 0 件でも state マーカー自体は埋まる ({} = マーカー有り・空)。
+    assert tracked == {}
+    assert agg._extract_state(body) == {}
+
+
+# ----------------------------- state 埋込 / 差分 (Discord 通知) -----------------------------
+def test_extract_state_no_marker_returns_none():
+    # マーカー自体が無い旧 Issue 本文は None (初回シードとして通知スキップの判定に使う)。
+    assert agg._extract_state("旧 Issue 本文、state マーカー無し") is None
+    assert agg._extract_state("") is None
+
+
+def test_embed_extract_roundtrip():
+    tracked = {"CVE-X": ["9.8", "no-fix", "glibc"], "CVE-Y": ["5.5", "fixable", "lua"]}
+    body = agg._embed_state("本文", tracked)
+    assert agg._extract_state(body) == tracked
+
+
+def test_discord_payload_added_and_removed():
+    tracked = {"CVE-NEW": ["9.8", "no-fix", "glibc"], "CVE-KEEP": ["5.0", "fixable", "lua"]}
+    old = {"CVE-KEEP": ["5.0", "fixable", "lua"], "CVE-GONE": ["7.5", "no-fix", "openssl"]}
+    added = [v for v in tracked if v not in old]
+    removed = [v for v in old if v not in tracked]
+    payload = agg._build_discord_payload("o/r", 751, added, removed, tracked, old)
+    embed = payload["embeds"][0]
+    assert "🆕 新規 1" in embed["title"] and "✅ 解消 1" in embed["title"]
+    assert embed["url"] == "https://github.com/o/r/issues/751"
+    assert embed["color"] == 0xB60205  # 新規あり=赤
+    assert "🆕 `CVE-NEW`" in embed["description"]
+    assert "✅ `CVE-GONE`" in embed["description"]
+    # 維持されている CVE は差分に出ない。
+    assert "CVE-KEEP" not in embed["description"]
+
+
+def test_discord_payload_resolved_only_is_green():
+    tracked = {}
+    old = {"CVE-GONE": ["7.5", "no-fix", "openssl"]}
+    payload = agg._build_discord_payload("o/r", 9, [], ["CVE-GONE"], tracked, old)
+    assert payload["embeds"][0]["color"] == 0x2DA44E  # 解消のみ=緑

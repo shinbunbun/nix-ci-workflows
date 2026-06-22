@@ -17,6 +17,8 @@ import json
 import os
 import re
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 
 from vulnxscan_common import make_requester, ok, sevf, short_target
@@ -24,6 +26,10 @@ from vulnxscan_common import make_requester, ok, sevf, short_target
 LABEL = "vulnxscan"
 TITLE = "🔎 vulnxscan: 脆弱性スキャン結果 (自動)"
 MARKER = "<!-- vulnxscan-auto -->"
+# 前回 run の追跡対象 CVE 集合を機械可読 JSON で本文末尾に埋め込む隠しマーカー。
+# 別 artifact/ファイルを持たず Issue 自身を state ストアにすることで、run 間差分
+# (新規流入 / 解消) を別ストア無しで算出できる (full scan 差分通知 #751)。
+STATE_RE = re.compile(r"<!-- vulnxscan-state:(.*?)-->", re.S)
 
 
 # --- notify.json 収集 + vuln_id で dedup ---
@@ -249,7 +255,19 @@ def build_body(signals_dir):
         lines.append("✅ 現在 NOTIFY / UNKNOWN / reclassified 対象の脆弱性はありません。")
     else:
         lines.append("> 確定FP/リスク受容は whitelist.csv に追記すると以降抑制されます。")
+    # --- run 間差分用の追跡セット (vid -> [sev, bucket, pkg]) ---
+    # Issue を open し続ける = 要対処/要確認バケツ (NOTIFY / judged / UNKNOWN / reclassified /
+    # likely-FP) のみ追跡する。spot-check は DROP 維持の「念のため」枠で単独では Issue を
+    # open しないため差分通知からも除外する (常時 alarm 化を避けるのと同じ方針)。
+    tracked = {}
+    for bucket, blist in (("fixable", fixable), ("no-fix", nofix), ("judged", judged_items),
+                          ("UNKNOWN", unknown_items), ("reclassified", reclass_items),
+                          ("likely-FP", likely_items)):
+        for vid, e in blist:
+            tracked[vid] = [e["severity"] or "?", bucket, joinset(e["packages"]) or "?"]
+
     body = "\n".join(lines)
+    body = _embed_state(body, tracked)
     counts = {
         "items": len(items),
         "judged": len(judged_items),
@@ -257,12 +275,101 @@ def build_body(signals_dir):
         "reclass": len(reclass_items),
         "likely": len(likely_items),
     }
-    return body, has_content, counts
+    return body, has_content, counts, tracked
+
+
+def _embed_state(body, tracked):
+    """本文末尾に追跡セットの隠し JSON を埋め込む (次 run の差分基準)。"""
+    blob = json.dumps(tracked, separators=(",", ":"), ensure_ascii=False)
+    return f"{body}\n\n<!-- vulnxscan-state:{blob} -->"
+
+
+def _extract_state(body):
+    """既存 Issue 本文から前回 run の追跡セットを取り出す。
+
+    マーカー自体が無い (本機能導入前の旧 Issue) 場合は None を返し、呼び出し側で
+    「初回シードにつき通知スキップ」と区別できるようにする。マーカーはあるが空 = 0 件は {}。
+    """
+    m = STATE_RE.search(body or "")
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(1).strip())
+    except json.JSONDecodeError:
+        return None
+
+
+def _fmt_diff_line(icon, vid, info):
+    sev, bucket, pkg = (list(info) + ["?", "?", "?"])[:3]
+    return f"{icon} `{vid}` (sev {sev} · {pkg} · {bucket})"
+
+
+def _build_discord_payload(repo, issue_number, added, removed, tracked, old_state):
+    """新規流入 (added) / 解消 (removed) を Discord embed payload に整形する。"""
+    issue_url = f"https://github.com/{repo}/issues/{issue_number}"
+    lines = []
+    LIMIT = 20  # 1 通あたりの行数上限 (Discord embed の上限とノイズ抑制)
+    # severity 降順で新規 → 解消の順に並べる。
+    for vid in sorted(added, key=lambda v: -sevf(tracked[v][0])):
+        lines.append(_fmt_diff_line("🆕", vid, tracked[vid]))
+    for vid in sorted(removed, key=lambda v: -sevf(old_state[v][0])):
+        lines.append(_fmt_diff_line("✅", vid, old_state[vid]))
+    shown, extra = lines[:LIMIT], len(lines) - LIMIT
+    if extra > 0:
+        shown.append(f"… 他 {extra} 件")
+    desc = "\n".join(shown)
+    color = 0xB60205 if added else 0x2DA44E  # 新規あり=赤 / 解消のみ=緑
+    title = f"🔎 vulnxscan: full scan で差分検出 (🆕 新規 {len(added)} / ✅ 解消 {len(removed)})"
+    return {
+        "embeds": [{
+            "title": title,
+            "url": issue_url,
+            "description": desc,
+            "color": color,
+            "footer": {"text": f"{repo} · 集約 Issue #{issue_number}"},
+        }],
+    }
+
+
+def _post_discord(webhook, payload):
+    """Discord webhook へ POST。失敗してもレポート upsert は成功済みなので job は落とさない。"""
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(webhook, data=data,
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            if not ok(resp.status):
+                print(f"::warning::Discord 通知が status={resp.status} を返しました")
+    except (urllib.error.URLError, OSError) as ex:
+        print(f"::warning::Discord 通知に失敗しました: {ex}")
+
+
+def _maybe_notify(repo, issue_number, tracked, old_state):
+    """前回 state との差分があれば Discord に通知する (full scan 差分通知 #751)。
+
+    - DISCORD_WEBHOOK_URL 未設定 → スキップ (opt-in)。
+    - old_state is None (旧 Issue にマーカー無し) → 初回シードにつき通知せず state 埋込のみ
+      (導入直後に全件を「新規」として誤爆させないため)。
+    - 差分が無ければ通知しない。
+    """
+    webhook = os.environ.get("DISCORD_WEBHOOK_URL")
+    if not webhook:
+        return
+    if old_state is None:
+        print("::notice::前回 state マーカー無し (初回シード)。差分通知はスキップします。")
+        return
+    added = [v for v in tracked if v not in old_state]
+    removed = [v for v in old_state if v not in tracked]
+    if not added and not removed:
+        print("差分なし (Discord 通知なし)")
+        return
+    _post_discord(webhook, _build_discord_payload(repo, issue_number, added, removed, tracked, old_state))
+    print(f"Discord 通知送信: 🆕 {len(added)} / ✅ {len(removed)}")
 
 
 def main(argv):
     signals_dir = argv[1] if len(argv) > 1 else "signals"
-    body, has_content, counts = build_body(signals_dir)
+    body, has_content, counts, tracked = build_body(signals_dir)
 
     repo = os.environ.get("GITHUB_REPOSITORY")
     token = os.environ.get("GITHUB_TOKEN")
@@ -300,6 +407,9 @@ def main(argv):
         None,
     )
 
+    # 差分通知の基準は patch 前の既存 Issue 本文に埋まった前回 state (新規 Issue は None)。
+    old_state = _extract_state(existing.get("body")) if existing else None
+
     cnt = (f"NOTIFY {counts['items']} / judged {counts['judged']} / UNKNOWN {counts['unknown']} / "
            f"reclassified {counts['reclass']} / likely-FP {counts['likely']}")
     if has_content:
@@ -307,15 +417,20 @@ def main(argv):
             st, _ = req("PATCH", f"/repos/{repo}/issues/{existing['number']}", {"body": body, "state": "open"})
             must(st, f"issue #{existing['number']} の更新")
             print(f"updated issue #{existing['number']} ({cnt})")
+            _maybe_notify(repo, existing["number"], tracked, old_state)
         else:
-            st, _ = req("POST", f"/repos/{repo}/issues", {"title": TITLE, "body": body, "labels": [LABEL]})
+            st, created = req("POST", f"/repos/{repo}/issues", {"title": TITLE, "body": body, "labels": [LABEL]})
             must(st, "issue の作成")
             print(f"created issue ({cnt})")
+            # 新規 Issue = 前回 state 無し → _maybe_notify が初回シードとしてスキップする。
+            _maybe_notify(repo, (created or {}).get("number", "?"), tracked, old_state)
     else:
         if existing:
             st, _ = req("PATCH", f"/repos/{repo}/issues/{existing['number']}", {"body": body, "state": "closed"})
             must(st, f"issue #{existing['number']} の close")
             print(f"closed issue #{existing['number']} (NOTIFY 0 / UNKNOWN 0 / reclassified 0)")
+            # 全件解消 = removed のみの差分。解消通知 (緑) を出す。
+            _maybe_notify(repo, existing["number"], tracked, old_state)
         else:
             print("no NOTIFY/UNKNOWN/reclassified, no existing issue")
     return 0

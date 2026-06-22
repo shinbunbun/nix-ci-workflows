@@ -67,15 +67,34 @@ on:
           連続供給で timeout を踏まない。空なら従来どおり vulnix デフォルト (nvd.nist.gov)。
         type: string
         default: ''
+      needs-wireguard:
+        description: >-
+          WireGuard VPN (peer-issuer 経由) を張って LAN へ到達する。GitHub-hosted runner から
+          LAN VIP の NVD ミラー等を公開せずに使うため。true の場合 AUTHENTIK_CLIENT_ID secret と
+          wireguard-allowed-ips が必要。self-hosted runner は既に LAN 上なので不要。
+        type: boolean
+        default: false
+      wireguard-allowed-ips:
+        description: >-
+          needs-wireguard 時に VPN 経由で route する追加 LAN ホストの CIDR (カンマ区切り)。
+          例 nvd ミラー: 192.168.128.26/32。空だと wireguard action のデフォルトのみ。
+        type: string
+        default: ''
     secrets:
       ATTIC_READ_TOKEN:
         required: false
       ATTIC_TOKEN:
         required: false
+      AUTHENTIK_CLIENT_ID:
+        required: false
 
-permissions:
-  contents: read
-  actions: read   # main 最新スキャンの closure-paths artifact を gh run download するため
+# permissions はあえて宣言せず caller の job から継承する (build-nix.yaml と同方針)。
+# reusable が caller より広い permissions を宣言すると、それを付与していない caller は
+# startup_failure になる (例: needs-wireguard 用の id-token: write を無条件宣言すると、
+# WireGuard を使わない caller (dotfiles-private 等) まで id-token: write の付与を強制され
+# 起動失敗する)。caller 側の job で必要な権限を付与すること:
+#   - 必須: contents: read, actions: read (main 最新スキャンの closure-paths を gh run download)
+#   - needs-wireguard: true を使う場合のみ: id-token: write (WireGuard action の OIDC 認証用)
 
 jobs:
   diff-gate:
@@ -90,6 +109,15 @@ jobs:
           repository: shinbunbun/nix-ci-workflows
           ref: ${{ inputs.ci-workflows-ref }}
           path: .nix-ci-workflows
+
+      # GitHub-hosted runner から LAN (例 NVD ミラー VIP) へ到達するための VPN。
+      # post step で自動 teardown される。self-hosted runner は LAN 上なので呼ばない想定。
+      - name: Setup WireGuard VPN
+        if: inputs.needs-wireguard
+        uses: shinbunbun/nix-ci-workflows/.github/actions/wireguard@main
+        with:
+          authentik-client-id: ${{ secrets.AUTHENTIK_CLIENT_ID }}
+          extra-allowed-ips: ${{ inputs.wireguard-allowed-ips }}
 
       - name: Install Nix with flakes enabled
         uses: shinbunbun/nix-ci-workflows/.github/actions/setup-nix-attic@main

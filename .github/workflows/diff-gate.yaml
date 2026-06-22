@@ -59,6 +59,14 @@ on:
           ファイル不在ならスキップ。
         type: string
         default: '.github/vulnxscan-whitelist.csv'
+      nvd-mirror:
+        description: >-
+          NVD 2.0 バルクフィードの LAN ミラー URL (例 http://192.168.128.26/)。設定すると
+          vulnix に `-m` で渡す。vulnix は NVD を timeout=10 (inter-byte stall) で取りに行くため
+          throttle 中の直取得が chronic に失敗 (fail-closed 偽ブロック) するが、LAN ミラーなら
+          連続供給で timeout を踏まない。空なら従来どおり vulnix デフォルト (nvd.nist.gov)。
+        type: string
+        default: ''
     secrets:
       ATTIC_READ_TOKEN:
         required: false
@@ -141,6 +149,8 @@ jobs:
           TARGET: ${{ inputs.target }}
           NOCHECK: ${{ inputs.vulnix-nocheck }}
           WHITELIST: ${{ inputs.whitelist }}
+          # 設定時 vulnxscan_diff_gate.py が vulnix に `-m $VULNIX_MIRROR` を渡す。空なら無視。
+          VULNIX_MIRROR: ${{ inputs.nvd-mirror }}
         run: |
           set -euo pipefail
           # vulnix を PATH に供給。darwin は checkPhase 無効版 (nocheck flake)、それ以外は nixpkgs。
